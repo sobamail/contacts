@@ -1,0 +1,12 @@
+{
+    "recommendations": [
+        "svelte.svelte-vscode",
+        "xaver.clang-format",
+        "usernamehw.errorlens",
+        "firefox-devtools.vscode-firefox-debug",
+        "pkief.material-icon-theme",
+        "vitest.explorer",
+        "redhat.vscode-xml",
+        "redhat.vscode-yaml",
+    ]
+}

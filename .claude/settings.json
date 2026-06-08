@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit",
+      "Write",
+      "Bash(pnpm *)",
+      "Bash(node --check *)",
+      "Bash(git add *)",
+      "Bash(git checkout *)",
+      "Bash(git stash *)",
+      "Bash(git rebase *)",
+      "Bash(git reset *)",
+      "Bash(git commit *)",
+      "Bash(sqlite3 *)",
+      "Bash(.claude/skills/sobamail-app/scripts/gen-hash.py *)",
+      "Bash(.claude/skills/sobamail-app/scripts/mutlog.py *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/console.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/eval.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/input.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/lib.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/network.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/pages.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/query.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/reload.mjs *)",
+      "Bash(node .claude/skills/sobamail-app/scripts/devtools/shot.mjs *)"
+    ]
+  }
+}
