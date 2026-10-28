@@ -75,3 +75,63 @@ export async function delete_person(uuid: string) {
     await request("DeletePerson", {uuid});
     return true;
 }
+
+// Every mutation the runtime writes to this instance arrives on /api/v2/event, named by
+// the insert event of its table; a deleted row is announced as base's DeleteRow. All
+// of them touch people.
+const BASE_NS = "https://sobamail.com/module/base/v1";
+export const CHANGE_KEYS = [
+    `{${namespace}}AddPerson`,
+    `{${namespace}}SetPersonAttr`,
+    `{${namespace}}AddPersonAttr`,
+    `{${namespace}}AddPersonAttrValue`,
+    `{${namespace}}SetPersonAttrLabel`,
+    `{${BASE_NS}}DeleteRow`,
+];
+
+// Calls `onChange` once the people change, from this page, another one or another
+// replica. Events carry no rows and may repeat, and one save writes several rows, so a
+// burst is folded into a single call `delay` ms after its last event. Returns the
+// function that stops watching.
+export function watch_people(onChange: () => void, delay = 150): () => void {
+    if (typeof EventSource === "undefined") {
+        return () => {};
+    }
+
+    let es: EventSource|null = null;
+    let timer: ReturnType<typeof setTimeout>|undefined;
+    let reopen: ReturnType<typeof setTimeout>|undefined;
+    let stopped = false;
+
+    const kick = () => {
+        clearTimeout(timer);
+        timer = setTimeout(onChange, delay);
+    };
+
+    const open = (fresh: boolean) => {
+        es = new EventSource("/api/v2/event");
+        for (const k of CHANGE_KEYS) {
+            es.addEventListener(k, kick);
+        }
+        // a new stream doesn't replay what was missed while there was none
+        if (fresh) {
+            es.addEventListener("open", kick, {once : true});
+        }
+        // the browser retries a dropped stream itself, with Last-Event-ID; a refused
+        // one (a 400 for an id the runtime no longer knows) stays closed
+        es.onerror = () => {
+            if (es?.readyState === EventSource.CLOSED && ! stopped) {
+                es.close();
+                reopen = setTimeout(() => open(true), 5000);
+            }
+        };
+    };
+    open(false);
+
+    return () => {
+        stopped = true;
+        clearTimeout(timer);
+        clearTimeout(reopen);
+        es?.close();
+    };
+}

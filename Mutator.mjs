@@ -10,20 +10,30 @@ import {
     DeleteRow,
     Message,
     MessageAttachment,
-} from "https://sobamail.com/module/base/v1?sha224=FT31A9Ojcmu_lm2HSbwlKpw5FDVqfP2ESNjmrg";
+} from "https://sobamail.com/module/base/v1?sha224=Vj_Th4VBElplcMExD0auypOwjcxuRw7RhvfbaA";
 import {
+    AddGroup,
+    AddGroupMember,
     AddPerson,
     AddPersonAttr,
     AddPersonAttrValue,
     DeletePerson,
+    DelGroup,
+    DelGroupMember,
     GetPeople,
     GetPerson,
+    Group,
+    GroupAttr,
+    GroupMember,
+    mailed_object,
     MalformedObject,
     PutPerson,
     SendVCard,
+    SetAttrGroup,
     SetPersonAttr,
     SetPersonAttrLabel,
-} from "https://sobamail.com/module/contacts/v1?sha224=9F77Q615OJCAHF1KIOOEP68JL2BQTQ7BL74R4CGQAC3PO";
+    UnsetAttrGroup,
+} from "https://sobamail.com/module/contacts/v1?sha224=H4RcRv01nNNQl6oBX24TmTu9_53payBujQcr6A";
 
 // what the module's mail-sending objects need from the base module, which it can't import
 const MAIL = {
@@ -34,7 +44,7 @@ const MAIL = {
 export default class Application {
     static id = "contacts.app.sobamail.com";
     static name = "Contacts";
-    static version = "1.2.0.8";
+    static version = "1.2.2.0";
     static objects = new Map([
         [ DeleteRow.KEY, false ],
         [ AddPerson.KEY, false ],
@@ -44,6 +54,16 @@ export default class Application {
         [ SetPersonAttrLabel.KEY, false ],
         [ PutPerson.KEY, false ],
         [ DeletePerson.KEY, false ],
+
+        [ Group.KEY, false ],
+        [ GroupAttr.KEY, false ],
+        [ GroupMember.KEY, false ],
+        [ AddGroup.KEY, false ],
+        [ DelGroup.KEY, false ],
+        [ SetAttrGroup.KEY, false ],
+        [ UnsetAttrGroup.KEY, false ],
+        [ AddGroupMember.KEY, false ],
+        [ DelGroupMember.KEY, false ],
 
         [ GetPerson.KEY, false ],
         [ GetPeople.KEY, false ],
@@ -58,6 +78,16 @@ export default class Application {
         [ SetPersonAttrLabel.KEY, (content) => (new SetPersonAttrLabel(content)).process() ],
         [ PutPerson.KEY, (content) => (new PutPerson(content)).process() ],
         [ DeletePerson.KEY, (content) => (new DeletePerson(content)).process() ],
+
+        [ Group.KEY, (content) => (new Group(content)).process() ],
+        [ GroupAttr.KEY, (content) => (new GroupAttr(content)).process() ],
+        [ GroupMember.KEY, (content) => (new GroupMember(content)).process() ],
+        [ AddGroup.KEY, (content) => (new AddGroup(content)).process() ],
+        [ DelGroup.KEY, (content) => (new DelGroup(content)).process() ],
+        [ SetAttrGroup.KEY, (content) => (new SetAttrGroup(content)).process() ],
+        [ UnsetAttrGroup.KEY, (content) => (new UnsetAttrGroup(content)).process() ],
+        [ AddGroupMember.KEY, (content) => (new AddGroupMember(content)).process() ],
+        [ DelGroupMember.KEY, (content) => (new DelGroupMember(content)).process() ],
 
         [ GetPerson.KEY, (content) => (new GetPerson(content)).process() ],
         [ GetPeople.KEY, (content) => (new GetPeople(content)).process() ],
@@ -224,19 +254,113 @@ export default class Application {
                 },
             ],
         });
+
+        // groups (v1.mjs): circles of people keyed by a uuid, mailed by the server
+        soba.schema.table({
+            name : "grp",
+            insertEvent : Group,
+            deleteEvent : DeleteRow,
+            columns : [
+                {
+                    name : "uuid",
+                    checks : [
+                        {op : "!=", value : null},
+                        {op : "typeof", value : "text"},
+                        {op : "lww", value : true},
+                        {op : "regexp", value : soba.type.uuid.pattern},
+                    ],
+                },
+            ],
+        });
+
+        soba.schema.table({
+            name : "group_attr",
+            insertEvent : GroupAttr,
+            deleteEvent : DeleteRow,
+            columns : [
+                {
+                    name : "grp",
+                    checks : [
+                        {op : "!=", value : null},
+                        {op : "fk", table : "grp", column : "uuid"},
+                    ],
+                },
+                {
+                    name : "key",
+                    checks : [
+                        {op : "!=", value : null},
+                        {op : "!=", value : ""},
+                        {op : "typeof", value : "text"},
+                    ],
+                },
+                {
+                    name : "value",
+                    checks : [],
+                },
+            ],
+            checks : [
+                {
+                    columns : [ "grp", "key" ],
+                    op : "lww",
+                    value : true,
+                },
+            ],
+        });
+
+        soba.schema.table({
+            name : "group_member",
+            insertEvent : GroupMember,
+            deleteEvent : DeleteRow,
+            columns : [
+                {
+                    name : "grp",
+                    checks : [
+                        {op : "!=", value : null},
+                        {op : "fk", table : "grp", column : "uuid"},
+                    ],
+                },
+                {
+                    name : "address",
+                    checks : [
+                        {op : "!=", value : null},
+                        {op : "!=", value : ""},
+                        {op : "typeof", value : "text"},
+                    ],
+                },
+            ],
+            checks : [
+                {
+                    columns : [ "grp", "address" ],
+                    op : "lww",
+                    value : true,
+                },
+            ],
+        });
     }
 
     process(message, metadata) {
         soba.log.info(JSON.stringify(metadata));
 
-        // only local deliveries (ui requests, tasks and their replays) may touch the address
-        // book. anything that arrives by mail is refused.
-        if (metadata.type !== "task" && metadata.type !== "task-replay") {
-            soba.log.warning(`Rejected non-local delivery of type '${metadata.type}'`);
+        // local deliveries (ui requests, tasks and their replays) may touch the address book.
+        // by mail, only the server's group objects are taken (mailed_object() in v1.mjs).
+        let object = null;
+        if (metadata.type === "message") {
+            if (metadata.location === "limbo") {
+                return;
+            }
+            object = mailed_object(message);
+            if (! object) {
+                return;
+            }
+        }
+        else if (metadata.type === "task" || metadata.type === "task-replay") {
+            object = Message.extractObject(message, metadata);
+        }
+        else {
+            soba.log.warning(`Rejected delivery of type '${metadata.type}'`);
             return;
         }
 
-        const object = Message.extractObject(message, metadata);
         if (! object) {
             soba.log.debug("Unrecognized content");
             return;

@@ -110,7 +110,8 @@ export class SetPersonAttrLabel {
         return `Label '${this.value}' in the ${this.key} of contact ${this.person} '${this.label}'`;
     }
     toString() {
-        return `SetPersonAttrLabel(${this.person}, '${this.key}', '${this.value}', '${this.label}')`;
+        return `SetPersonAttrLabel(${this.person}, '${this.key}', '${this.value}', '${
+                this.label}')`;
     }
 }
 
@@ -218,7 +219,7 @@ const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 // display order of QSTR_PERSON_NAMES rows: by last name (the first name when there is
 // none), then first name, ignoring case and accents. people without a name go last, the
 // uuid breaks ties.
-function compare_names([a_uuid, a_first, a_last ], [b_uuid, b_first, b_last ]) {
+function compare_names([ a_uuid, a_first, a_last ], [ b_uuid, b_first, b_last ]) {
     const a = [ fold(a_last ?? "") || fold(a_first ?? ""), fold(a_first ?? "") ];
     const b = [ fold(b_last ?? "") || fold(b_first ?? ""), fold(b_first ?? "") ];
     if (! a[0] !== ! b[0]) {
@@ -247,16 +248,16 @@ function assign_attr(person, key, value, multi) {
 // every person's uuid in display order, or only those in the Set `matches`
 function ordered_uuids(matches = null) {
     return query(QSTR_PERSON_NAMES)
-            .filter(([uuid]) => ! matches || matches.has(uuid))
+            .filter(([ uuid ]) => ! matches || matches.has(uuid))
             .sort(compare_names)
-            .map(([uuid]) => uuid);
+            .map(([ uuid ]) => uuid);
 }
 
 // the people of `uuids` with all their attributes and labels, in that order. a uuid with
 // nothing stored comes back as an empty Person.
 function load_people(uuids) {
     const json = JSON.stringify(uuids);
-    const people = new Map(uuids.map((u) => [ u, new Person({uuid : u}) ]));
+    const people = new Map(uuids.map((u) => [u, new Person({uuid : u})]));
 
     // the left join keeps people that have no attributes at all: one row with a null key
     for (const [u, key, value, multi] of query(`SELECT p.value,
@@ -324,8 +325,8 @@ export class PutPerson {
     // changed against it, so changes synced in from another replica meanwhile survive; a
     // field the user did change wins over such a change.
     process() {
-        const single = SINGLE_ATTRS.map((key) => [ key, clean_text(this[key]) ]);
-        const multi = MULTI_ATTRS.map((key) => [ key, clean_list(this[key]) ]);
+        const single = SINGLE_ATTRS.map((key) => [key, clean_text(this[key])]);
+        const multi = MULTI_ATTRS.map((key) => [key, clean_list(this[key])]);
         const base = this.uuid ? this.base : null;
 
         if (! this.uuid) {
@@ -337,9 +338,9 @@ export class PutPerson {
         }
 
         // current state, to find what this request removes
-        const cur_single = new Set(
-                query("SELECT key FROM person_attr_single WHERE person = ?", this.uuid)
-                        .map((r) => r[0]));
+        const cur_single =
+                new Set(query("SELECT key FROM person_attr_single WHERE person = ?", this.uuid)
+                                .map((r) => r[0]));
         const cur_multi = new Map();
         for (const [key, value] of query(
                      "SELECT key, value FROM person_attr_multi_value WHERE person = ?",
@@ -390,8 +391,9 @@ export class PutPerson {
                 const added = values.filter((v) => ! before.includes(v));
                 target = (removed.length === 0 && added.length === 0)
                         ? current // not changed by the user
-                        : clean_list([...current.filter((v) => ! removed.includes(clean_text(v))),
-                                       ...added ]);
+                        : clean_list([
+                              ...current.filter((v) => ! removed.includes(clean_text(v))), ...added
+                          ]);
             }
 
             if (! same_values(target, current)) {
@@ -505,6 +507,198 @@ export class DeletePerson {
         }
         delete_row("person", {uuid : this.uuid});
     }
+}
+
+// Groups: circles of people keyed by a uuid (the company is one, with type "company"), kept
+// in sync by the server with the six request objects below. A group lists every member, the
+// mailbox's own addresses included. The table is "grp", not "group": the runtime quotes table
+// names in the DDL it generates but not column names, and the attr and member tables need a
+// column naming their group.
+
+export class Group {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid} = {}) {
+        if (! uuid) {
+            throw new MalformedObject("Missing Group.uuid");
+        }
+        this.uuid = uuid;
+    }
+
+    process() { soba.data.insert("grp", this); }
+
+    asText(locale) { return `Add group ${this.uuid}`; }
+    toString() { return `Group(${this.uuid})`; }
+}
+
+export class GroupAttr {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({grp, key, value} = {}) {
+        if (! grp) {
+            throw new MalformedObject("Missing GroupAttr.grp");
+        }
+        if (! key) {
+            throw new MalformedObject("Missing GroupAttr.key");
+        }
+
+        this.grp = grp;
+        this.key = key;
+        this.value = value;
+    }
+
+    process() { soba.data.insert("group_attr", this); }
+
+    asText(locale) { return `Set ${this.key} of group ${this.grp} to '${this.value}'`; }
+    toString() { return `GroupAttr(${this.grp}, '${this.key}', '${this.value}')`; }
+}
+
+export class GroupMember {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({grp, address} = {}) {
+        if (! grp) {
+            throw new MalformedObject("Missing GroupMember.grp");
+        }
+        if (! address) {
+            throw new MalformedObject("Missing GroupMember.address");
+        }
+
+        this.grp = grp;
+        this.address = address;
+    }
+
+    process() { soba.data.insert("group_member", this); }
+
+    asText(locale) { return `Add ${this.address} to group ${this.grp}`; }
+    toString() { return `GroupMember(${this.grp}, '${this.address}')`; }
+}
+
+// the trimmed text of a required field, `what` naming it in the error
+function required_text(v, what) {
+    const ret = clean_text(v);
+    if (! ret) {
+        throw new MalformedObject(`Missing ${what}`);
+    }
+    return ret;
+}
+
+// deletes the row of lww `key` in `table` when there is one: a find on a key never inserted
+// throws and aborts the pass
+function delete_if_any(table, key) {
+    const columns = Object.keys(key);
+    const where = columns.map((c) => `${c} = ?`).join(" AND ");
+    if (query(`SELECT 1 FROM ${table} WHERE ${where}`, ...columns.map((c) => key[c])).length > 0) {
+        delete_row(table, key);
+    }
+}
+
+export class AddGroup {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid} = {}) { this.uuid = required_text(uuid, "Group.uuid"); }
+    process() { (new Group({uuid : this.uuid})).process(); }
+}
+
+export class DelGroup {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid} = {}) { this.uuid = required_text(uuid, "Group.uuid"); }
+
+    // its attributes and members go with it (every fk cascades)
+    process() { delete_if_any("grp", {uuid : this.uuid}); }
+}
+
+export class SetAttrGroup {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid, key, value = ""} = {}) {
+        this.uuid = required_text(uuid, "Group.uuid");
+        this.key = required_text(key, "GroupAttr.key");
+        this.value = clean_text(value);
+    }
+
+    process() {
+        (new Group({uuid : this.uuid})).process();
+        (new GroupAttr({grp : this.uuid, key : this.key, value : this.value})).process();
+    }
+}
+
+export class UnsetAttrGroup {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid, key} = {}) {
+        this.uuid = required_text(uuid, "Group.uuid");
+        this.key = required_text(key, "GroupAttr.key");
+    }
+
+    process() { delete_if_any("group_attr", {grp : this.uuid, key : this.key}); }
+}
+
+export class AddGroupMember {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid, address} = {}) {
+        this.uuid = required_text(uuid, "Group.uuid");
+        this.address = required_text(address, "GroupMember.address");
+    }
+
+    process() {
+        (new Group({uuid : this.uuid})).process();
+        (new GroupMember({grp : this.uuid, address : this.address})).process();
+    }
+}
+
+export class DelGroupMember {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid, address} = {}) {
+        this.uuid = required_text(uuid, "Group.uuid");
+        this.address = required_text(address, "GroupMember.address");
+    }
+
+    process() { delete_if_any("group_member", {grp : this.uuid, address : this.address}); }
+}
+
+const NS_BASE = "https://sobamail.com/module/base/v1";
+
+// the objects the app takes by mail
+const MAILED = new Set([
+    AddGroup.KEY,
+    DelGroup.KEY,
+    SetAttrGroup.KEY,
+    UnsetAttrGroup.KEY,
+    AddGroupMember.KEY,
+    DelGroupMember.KEY,
+]);
+
+function is_smc(v) {
+    return v !== null && typeof v === "object" && typeof v.namespace === "string"
+            && typeof v.name === "string";
+}
+
+// The deployment's apps account, the sender of the group objects: one address for every
+// recipient, whatever the recipient's domain.
+const ADDR_APPS = "apps@api.sobamail.com";
+
+// The object of a mailed structured message that the app takes, or null. Only the group
+// objects are taken, and only from ADDR_APPS, in an Envelope carrying a signature: the runtime
+// rejects one that doesn't verify against From before the app runs, so a signed Envelope's
+// sender is who sent it, and an unsigned object names no sender at all.
+export function mailed_object(message) {
+    const content = message?.bodyObject?.content;
+    if (! is_smc(content) || content.namespace !== NS_BASE || content.name !== "Envelope") {
+        soba.log.warning("Refused a mailed object outside a signed Envelope");
+        return null;
+    }
+
+    const {sender, signature, content : object} = content.content ?? {};
+    if (! is_smc(object) || ! MAILED.has(`{${object.namespace}}${object.name}`)) {
+        soba.log.warning("Refused a mailed object the app doesn't take by mail");
+        return null;
+    }
+    if (! signature || ! (signature.length ?? signature.byteLength)) {
+        soba.log.warning(`Refused an unsigned mailed ${object.name}`);
+        return null;
+    }
+
+    if (clean_text(sender).toLowerCase() !== ADDR_APPS) {
+        soba.log.warning(`Refused a mailed ${object.name} from '${sender}'`);
+        return null;
+    }
+
+    return object;
 }
 
 // Mails a vCard file the UI wrote, as an attachment, to the addresses the UI gives. The

@@ -111,6 +111,58 @@ export class DeletePerson {
     process(): void;
 }
 
+// The group objects the server mails, and the replicated events they write.
+
+export class Group {
+    constructor(init?: { uuid?: string });
+    process(): void;
+}
+
+export class GroupAttr {
+    constructor(init?: { grp?: string; key?: string; value?: unknown });
+    process(): void;
+}
+
+export class GroupMember {
+    constructor(init?: { grp?: string; address?: string });
+    process(): void;
+}
+
+export class AddGroup {
+    constructor(init?: { uuid?: string });
+    process(): void;
+}
+
+export class DelGroup {
+    constructor(init?: { uuid?: string });
+    process(): void;
+}
+
+export class SetAttrGroup {
+    constructor(init?: { uuid?: string; key?: string; value?: string });
+    process(): void;
+}
+
+export class UnsetAttrGroup {
+    constructor(init?: { uuid?: string; key?: string });
+    process(): void;
+}
+
+export class AddGroupMember {
+    constructor(init?: { uuid?: string; address?: string });
+    process(): void;
+}
+
+export class DelGroupMember {
+    constructor(init?: { uuid?: string; address?: string });
+    process(): void;
+}
+
+/** The SMC object of a mailed structured message the app takes, or null. */
+export function mailed_object(
+    message: unknown,
+): { namespace: string; name: string; content: unknown } | null;
+
 /** The base module's mail classes, which the Mutator hands to SendVCard.process(). */
 export type MailClasses = {
     Message: new () => unknown;

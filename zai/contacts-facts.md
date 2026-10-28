@@ -11,6 +11,24 @@ Durable findings about this app. Update this file when one of them changes.
 | `person_attr_multi` | `AddPersonAttr` | lww `[person, key]` | container row for a list: `emails`, `phones`, `tags` |
 | `person_attr_multi_value` | `AddPersonAttrValue` | none | one row per list item, composite fk to its container |
 | `person_attr_label` | `SetPersonAttrLabel` | lww `[person, key, value]` | the label of one email or phone (`work`, `mobile`...); fk to the person only |
+| `grp` | `Group` | lww `uuid` | a group: a circle of people keyed by a braced uuid |
+| `group_attr` | `GroupAttr` | lww `[grp, key]` | a group's scalar attributes: `type` (`company`...), `name` |
+| `group_member` | `GroupMember` | lww `[grp, address]` | one member address of a group |
+
+Groups are written by six request objects the server mails (Delivery below):
+`AddGroup{uuid}`, `DelGroup{uuid}` (its attrs and members cascade),
+`SetAttrGroup{uuid, key, value}`, `UnsetAttrGroup{uuid, key}`,
+`AddGroupMember{uuid, address}`, `DelGroupMember{uuid, address}`. They are requests,
+not insert events, because the mail gate reads `soba.app.account()`, which a replicated
+run refuses; each emits the internal insert events above. `SetAttrGroup` and
+`AddGroupMember` insert the group row first, so an out-of-order delivery still lands;
+the deletes look the row up first and ignore a missing one. A group lists EVERY member,
+the mailbox's own addresses included: a mailbox belongs to a group exactly when one of
+its addresses has a `group_member` row. The table is `grp`, not `group`: the runtime
+quotes table names in the DDL it generates but not column names (seen in a live
+profile's `main.db`, 2026-10-28: `CREATE TABLE "folder_attr" (... folder text, ...`),
+and the attr and member tables need a column naming their group, which as `group` would
+be a syntax error. No name needs quoting in a reader's SQL.
 
 Invariants:
 
@@ -45,12 +63,24 @@ Invariants:
 
 ## Delivery
 
-`process()` logs `JSON.stringify(metadata)` for every delivery and accepts only
-`metadata.type` `"task"` (ui requests) and `"task-replay"`. Anything arriving by mail
-is refused, so nobody can write to the address book by mailing it a structured
-object. Consequence: an instance in **shared** mode would not sync, because shared
-instances ship events between mailboxes by mail. Private-mode sync between one
-mailbox's replicas is unaffected.
+`process()` logs `JSON.stringify(metadata)` for every delivery. It dispatches
+`metadata.type` `"task"` (ui requests) and `"task-replay"` ungated, and of everything
+arriving by mail (`"message"`, limbo skipped) only what `mailed_object(message)` in
+`v1.mjs` returns: one of the six group requests, inside a `{base/v1}Envelope` with a
+non-empty `signature` whose `sender` is `apps@api.sobamail.com` (case-insensitive) —
+the deployment's apps account, one address for every recipient whatever its domain,
+the one soba-web/api signs the group objects as (its `ADDR_APPS`; owner, 2026-10-28:
+"soba-contacts must accept apps@api.sobamail.com, not apps@<recipients domain>").
+The runtime rejects a signature that doesn't
+verify against From before the app runs, so a signed Envelope's sender is who sent it;
+`Message.extractObject` drops the sender, hence the app's own unwrap (precedent:
+soba-mbmgr `user/Mutator.mjs` `process()`). Anything else by mail — a bare object, an
+unsigned one, another sender, a person object, an internal insert event — is logged and
+dropped, so nobody else can write to the address book by mail. Consequence: an
+instance in **shared** mode would not sync, because shared instances ship events
+between mailboxes by mail. Private-mode sync between one mailbox's replicas is
+unaffected. The gate reads no runtime state, so it runs the same whether or not the
+runtime treats an Envelope-wrapped request as replicated.
 
 `static objects` lists only what the app accepts: the events and the requests.
 Response classes (`PutPersonResponse`, `Person`, `GetPeopleResponse`,
@@ -220,7 +250,9 @@ fragment parser. `src/lib/contacts.test.ts` runs the module's request handlers o
 (sql.js) with the tables `Mutator.mjs` declares, mirrored by hand (keep the two in
 sync), and `soba.data.*` emulate lww replacement and fk cascades. Mutations, content
 addressing and replication are not modelled, so what replicas do with concurrent
-writes is not covered.
+writes is not covered. The tests never import `Mutator.mjs` (its imports are runtime
+URLs), so the mail gate lives in the module as `mailed_object()` and is pinned there,
+the dispatch in `process()` around it is not.
 
 `src/App.test.ts` renders `App.svelte` in jsdom (Testing Library; `vitest.config.ts`
 adds its svelte plugin) against `src/test/backend.ts`: a stubbed `fetch` that decodes

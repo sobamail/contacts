@@ -7,6 +7,7 @@
         put_person,
         delete_person,
         send_vcard,
+        watch_people,
         TAG_REPLIED,
     } from "$lib/model";
     import {
@@ -164,6 +165,40 @@
     $effect(() => {
         if (sentinel && observer) observer.observe(sentinel);
     });
+
+    // ---- Live updates (lib/model watch_people) -----------------------------
+    // A change made anywhere (another window, another device) rereads what is
+    // shown: the loaded pages in one request, so the scroll position stays and
+    // the next page follows on from them, and the selected contact.
+    async function refreshLive() {
+        const seq = ++fetchSeq; // drops a fetch in flight; this one covers it
+        const upto = offset + pageSize;
+        try {
+            const r = await read_people(query, [], upto, 0);
+            if (seq === fetchSeq) {
+                people = r;
+                lastCount = r.length - offset;
+            }
+        } catch (err) {
+            console.error("live refresh:", err);
+        } finally {
+            if (seq === fetchSeq) {
+                isLoading = false;
+                isAppending = false;
+            }
+        }
+        const uuid = selectedUuid;
+        if (uuid && !people.some((p) => p.uuid === uuid)) {
+            try {
+                const card = await read_person(uuid);
+                if (selectedUuid === uuid) selectedCard = card;
+            } catch (err) {
+                console.error("live refresh:", err);
+            }
+        }
+    }
+
+    onMount(() => watch_people(refreshLive));
 
     // A link that composes a message to `address`: in Sobamail the host opens
     // its own composer for an app page's mailto: links.

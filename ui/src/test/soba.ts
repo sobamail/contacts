@@ -51,6 +51,23 @@ CREATE TABLE person_attr_label (
     value NOT NULL,
     UNIQUE (person, key, value)
 );
+CREATE TABLE grp (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL UNIQUE
+);
+CREATE TABLE group_attr (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    grp TEXT NOT NULL REFERENCES grp (uuid) ON DELETE CASCADE,
+    key TEXT NOT NULL CHECK (key != ''),
+    value,
+    UNIQUE (grp, key)
+);
+CREATE TABLE group_member (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL CHECK (address != ''),
+    grp TEXT NOT NULL REFERENCES grp (uuid) ON DELETE CASCADE,
+    UNIQUE (grp, address)
+);
 `;
 
 // the columns an insert takes from its object, and the lww key
@@ -63,6 +80,9 @@ const TABLES: Record<string, { columns: string[]; lww: string[] }> = {
         columns: ["person", "key", "value", "label"],
         lww: ["person", "key", "value"],
     },
+    grp: { columns: ["uuid"], lww: ["uuid"] },
+    group_attr: { columns: ["grp", "key", "value"], lww: ["grp", "key"] },
+    group_member: { columns: ["grp", "address"], lww: ["grp", "address"] },
 };
 
 type Fields = Record<string, unknown>;

@@ -3,9 +3,13 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+    AddGroup,
+    AddGroupMember,
     AddPerson,
     AddPersonAttr,
     AddPersonAttrValue,
+    DelGroup,
+    DelGroupMember,
     DeletePerson,
     GetPeople,
     GetPeopleResponse,
@@ -14,11 +18,15 @@ import {
     Person,
     PutPerson,
     PutPersonResponse,
+    SetAttrGroup,
     SetPersonAttr,
     SetPersonAttrLabel,
+    UnsetAttrGroup,
+    mailed_object,
+    namespace,
     type PersonData,
 } from "$module/contacts/v1";
-import { install_fake_soba, type FakeSoba } from "../test/soba";
+import { ACCOUNT, install_fake_soba, type FakeSoba } from "../test/soba";
 
 let soba: FakeSoba;
 
@@ -311,6 +319,169 @@ describe("DeletePerson", () => {
         put({ firstName: "Some" });
         soba.run(new DeletePerson({ uuid: "{00000000-0000-4000-8000-0000000000ff}" }));
         expect(count("person")).toBe(1);
+    });
+});
+
+describe("groups", () => {
+    const group = "{00000000-0000-4000-8000-0000000000a1}";
+    const attrs = () =>
+        soba.sql("SELECT key, value FROM group_attr WHERE grp = ? ORDER BY key", group);
+    const members = () =>
+        soba
+            .sql("SELECT address FROM group_member WHERE grp = ? ORDER BY address", group)
+            .map((r) => r[0]);
+
+    it("AddGroup lands the group, once however often it comes", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new AddGroup({ uuid: group }));
+        expect(soba.sql("SELECT uuid FROM grp")).toEqual([[group]]);
+    });
+
+    it("SetAttrGroup writes name and type, and a second write replaces", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "type", value: "company" }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "name", value: "Old" }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "name", value: "New" }));
+        expect(attrs()).toEqual([
+            ["name", "New"],
+            ["type", "company"],
+        ]);
+    });
+
+    it("UnsetAttrGroup removes one attribute and ignores a missing one", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "type", value: "company" }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "name", value: "Acme" }));
+        soba.run(new UnsetAttrGroup({ uuid: group, key: "name" }));
+        soba.run(new UnsetAttrGroup({ uuid: group, key: "name" }));
+        expect(attrs()).toEqual([["type", "company"]]);
+    });
+
+    it("AddGroupMember twice for one address is one row", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new AddGroupMember({ uuid: group, address: "a@example.com" }));
+        soba.run(new AddGroupMember({ uuid: group, address: " a@example.com " }));
+        soba.run(new AddGroupMember({ uuid: group, address: ACCOUNT }));
+        expect(members()).toEqual(["a@example.com", ACCOUNT]);
+    });
+
+    it("AddGroupMember and SetAttrGroup create a group they arrive before", () => {
+        soba.run(new AddGroupMember({ uuid: group, address: "a@example.com" }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "type", value: "company" }));
+        expect(count("grp")).toBe(1);
+        expect(members()).toEqual(["a@example.com"]);
+    });
+
+    it("DelGroupMember removes the member and ignores a missing one", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new AddGroupMember({ uuid: group, address: "a@example.com" }));
+        soba.run(new AddGroupMember({ uuid: group, address: "b@example.com" }));
+        soba.run(new DelGroupMember({ uuid: group, address: "a@example.com" }));
+        soba.run(new DelGroupMember({ uuid: group, address: "a@example.com" }));
+        expect(members()).toEqual(["b@example.com"]);
+    });
+
+    it("DelGroup empties everything and ignores a missing group", () => {
+        soba.run(new AddGroup({ uuid: group }));
+        soba.run(new SetAttrGroup({ uuid: group, key: "type", value: "company" }));
+        soba.run(new AddGroupMember({ uuid: group, address: "a@example.com" }));
+        soba.run(new DelGroup({ uuid: group }));
+        soba.run(new DelGroup({ uuid: group }));
+        for (const table of ["grp", "group_attr", "group_member"]) {
+            expect(count(table), table).toBe(0);
+        }
+    });
+
+    it("reject content without its required fields as malformed", () => {
+        for (const make of [
+            () => new AddGroup({}),
+            () => new DelGroup({}),
+            () => new SetAttrGroup({ uuid: group }),
+            () => new SetAttrGroup({ key: "name" }),
+            () => new UnsetAttrGroup({ uuid: group }),
+            () => new AddGroupMember({ uuid: group, address: " " }),
+            () => new DelGroupMember({ address: "a@example.com" }),
+        ]) {
+            expect(make).toThrow(MalformedObject);
+            expect(make).toThrow(/^Missing Group[A-Za-z]*\.[a-z]+$/);
+        }
+    });
+
+    it("a replayed group object passes ungated", () => {
+        // a task or its replay reaches the handler without mailed_object(): nothing about
+        // the sender is asked
+        soba.run(new AddGroupMember({ uuid: group, address: "a@example.com" }));
+        expect(members()).toEqual(["a@example.com"]);
+    });
+});
+
+describe("mailed objects", () => {
+    const NS_BASE = "https://sobamail.com/module/base/v1";
+    // the deployment's apps account, one address for every recipient whatever its domain
+    const APPS = "apps@api.sobamail.com";
+    const add_group = {
+        namespace,
+        name: "AddGroup",
+        content: { uuid: "{00000000-0000-4000-8000-0000000000a1}" },
+    };
+    const bare = (object: unknown) => ({ bodyObject: { content: object } });
+    const envelope = (content: Record<string, unknown>) =>
+        bare({ namespace: NS_BASE, name: "Envelope", content });
+    const signed = (object: unknown, sender = APPS, signature: unknown = new Uint8Array([1, 2, 3])) =>
+        envelope({ sender, signature, content: object });
+
+    it("a group object signed by the deployment's apps account is taken", () => {
+        // the stand-in account is on example.com: the apps account is the same for every domain
+        expect(ACCOUNT.endsWith("@example.com")).toBe(true);
+        expect(mailed_object(signed(add_group))).toEqual(add_group);
+        expect(mailed_object(signed(add_group, "Apps@Api.Sobamail.COM"))).toEqual(add_group);
+        for (const name of [
+            "AddGroup",
+            "DelGroup",
+            "SetAttrGroup",
+            "UnsetAttrGroup",
+            "AddGroupMember",
+            "DelGroupMember",
+        ]) {
+            const object = { ...add_group, name };
+            expect(mailed_object(signed(object)), name).toEqual(object);
+        }
+    });
+
+    it("a group object from another sender is refused", () => {
+        for (const sender of [
+            "apps@example.com",
+            "someone@example.com",
+            "someone@api.sobamail.com",
+            "apps@sobamail.com",
+            "apps@sub.api.sobamail.com",
+            "",
+        ]) {
+            expect(mailed_object(signed(add_group, sender)), sender).toBeNull();
+        }
+    });
+
+    it("an unsigned group object is refused", () => {
+        expect(mailed_object(bare(add_group))).toBeNull();
+        expect(mailed_object(envelope({ sender: APPS, content: add_group }))).toBeNull();
+        for (const signature of [null, "", new Uint8Array(0), new ArrayBuffer(0)]) {
+            expect(mailed_object(signed(add_group, APPS, signature))).toBeNull();
+        }
+    });
+
+    it("a mailed PutPerson is refused", () => {
+        const put_person = { namespace, name: "PutPerson", content: { firstName: "Some" } };
+        expect(mailed_object(signed(put_person))).toBeNull();
+        for (const name of ["Group", "GroupAttr", "GroupMember", "DeletePerson"]) {
+            expect(mailed_object(signed({ ...add_group, name })), name).toBeNull();
+        }
+        expect(mailed_object(signed({ ...add_group, namespace: NS_BASE }))).toBeNull();
+    });
+
+    it("a message without a structured body is refused", () => {
+        for (const message of [{}, { bodyObject: {} }, bare(null), signed(null), signed("x")]) {
+            expect(mailed_object(message)).toBeNull();
+        }
     });
 });
 
