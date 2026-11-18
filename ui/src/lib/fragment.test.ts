@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { holds_email, parse_fragment, same_name, split_name } from "./fragment";
+import {
+    card_fragment,
+    email_fragment,
+    holds_email,
+    parse_fragment,
+    same_name,
+    shown_panes,
+    split_name,
+} from "./fragment";
 
 describe("parse_fragment", () => {
     it("treats an empty fragment as the app's root", () => {
@@ -53,10 +61,61 @@ describe("parse_fragment", () => {
         expect(show('"')).toMatchObject({ name: '"' });
     });
 
+    it("shows a card by its uuid, the email and name ignored", () => {
+        expect(parse_fragment("#person/show?uuid=%7Babc%7D")).toEqual({
+            action: "card",
+            uuid: "{abc}",
+        });
+        expect(parse_fragment("#person/show?uuid=u1&email=a@b.com")).toEqual({
+            action: "card",
+            uuid: "u1",
+        });
+        expect(parse_fragment("#" + card_fragment("{a b}"))).toEqual({
+            action: "card",
+            uuid: "{a b}",
+        });
+    });
+
+    it("spells the email fragment as the client does", () => {
+        expect(email_fragment(" a+b@c.com ", "Some One")).toBe(
+            "person/show?email=a%2Bb%40c.com&name=Some%20One",
+        );
+        expect(parse_fragment("#" + email_fragment("a+b@c.com", "Some One"))).toEqual({
+            action: "show",
+            email: "a+b@c.com",
+            name: "Some One",
+        });
+        expect(email_fragment("a@b.com", " ")).toBe("person/show?email=a%40b.com");
+    });
+
+    it("names the panes of pane/, in screen order", () => {
+        expect(parse_fragment("#pane/left")).toEqual({ action: "pane", panes: ["left"] });
+        expect(parse_fragment("#pane/right")).toEqual({ action: "pane", panes: ["right"] });
+        expect(parse_fragment("#pane/right,left")).toEqual({
+            action: "pane",
+            panes: ["left", "right"],
+        });
+    });
+
+    it("rejects an pane/ naming no pane, an unknown one or carrying a query", () => {
+        for (const hash of ["#pane/", "#pane", "#pane/middle", "#pane/left,top", "#pane/left?x=1"]) {
+            expect(parse_fragment(hash), hash).toBe("invalid");
+        }
+    });
+
     it("takes the first of a repeated item", () => {
         expect(parse_fragment("#person/show?email=a@b.com&email=c@d.com")).toMatchObject({
             email: "a@b.com",
         });
+    });
+});
+
+describe("shown_panes", () => {
+    it("shows every pane but under pane/", () => {
+        expect(shown_panes("")).toEqual(["left", "right"]);
+        expect(shown_panes("#person/new")).toEqual(["left", "right"]);
+        expect(shown_panes("#pane/middle")).toEqual(["left", "right"]);
+        expect(shown_panes("#pane/left")).toEqual(["left"]);
     });
 });
 

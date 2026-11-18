@@ -1,6 +1,6 @@
 <script>
     // Removable label / filter chip.
-    let { color = "", onRemove = undefined, children } = $props();
+    let { color = "", onRemove = undefined, removeLabel = "Remove", children } = $props();
 </script>
 
 <span class="vm vm-tag">
@@ -13,7 +13,7 @@
             class="vm-tag__x"
             role="button"
             tabindex="0"
-            aria-label="Remove"
+            aria-label={removeLabel}
             onclick={onRemove}
             onkeydown={(e) => {
                 if (e.key === "Enter" || e.key === " ") onRemove(e);

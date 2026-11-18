@@ -11,9 +11,15 @@ import {
     DelGroup,
     DelGroupMember,
     DeletePerson,
+    GetGroupMembers,
+    GetGroupMembersResponse,
+    GetGroups,
+    GetGroupsResponse,
     GetPeople,
     GetPeopleResponse,
     GetPerson,
+    GetTags,
+    GetTagsResponse,
     MalformedObject,
     Person,
     PutPerson,
@@ -210,6 +216,71 @@ describe("PutPerson with the form's base", () => {
             tags: ["Replied", "work"],
             labels: { emails: { "o@example.com": "work" } },
         });
+    });
+});
+
+// The server's colleague card (soba-web/api): a PutPerson mailed by apps@, keyed by the
+// colleague's mailbox uuid
+describe("a mailed PutPerson", () => {
+    const uuid = "{00000000-0000-4000-8000-0000000000c1}";
+    const mailed = (content: ConstructorParameters<typeof PutPerson>[0]) =>
+        soba.run<unknown>({ process: () => new PutPerson(content).process({ mailed: true }) });
+
+    it("creates the card under the uuid it names and answers nobody", () => {
+        expect(
+            mailed({ uuid, firstName: "Some", lastName: "One", emails: ["some@example.com"] }),
+        ).toBeUndefined();
+        expect(get(uuid)).toMatchObject({
+            uuid,
+            firstName: "Some",
+            lastName: "One",
+            emails: ["some@example.com"],
+        });
+    });
+
+    it("without a base, replaces a card already under its uuid", () => {
+        put({ uuid, firstName: "Some", lastName: "One", phones: ["+90 212 555 0000"] });
+        mailed({ uuid, firstName: "Some", lastName: "One", emails: ["some@example.com"] });
+        expect(get(uuid)).toMatchObject({ phones: [], emails: ["some@example.com"] });
+    });
+
+    it("is malformed without a uuid", () => {
+        expect(() => mailed({ firstName: "Some" })).toThrow(MalformedObject);
+        expect(count("person")).toBe(0);
+    });
+
+    it("with a base, renames and tags the card and keeps everything else", () => {
+        put({
+            uuid,
+            firstName: "Some",
+            lastName: "One",
+            emails: ["some@example.com"],
+            phones: ["+90 212 555 0000"],
+            tags: ["golf"],
+        });
+        mailed({
+            uuid,
+            firstName: "Some",
+            lastName: "Two",
+            base: { firstName: "Some", lastName: "One" },
+        });
+        mailed({ uuid, tags: ["Former colleague"], base: {} });
+        expect(get(uuid)).toMatchObject({
+            firstName: "Some",
+            lastName: "Two",
+            emails: ["some@example.com"],
+            phones: ["+90 212 555 0000"],
+            tags: ["golf", "Former colleague"],
+        });
+    });
+
+    it("with a base, is dropped when the user deleted the card", () => {
+        put({ uuid, firstName: "Some", lastName: "One" });
+        soba.run(new DeletePerson({ uuid }));
+        mailed({ uuid, firstName: "Other", base: { firstName: "Some" } });
+        mailed({ uuid, tags: ["Former colleague"], base: {} });
+        expect(count("person")).toBe(0);
+        expect(count("person_attr_single")).toBe(0);
     });
 });
 
@@ -415,6 +486,54 @@ describe("groups", () => {
     });
 });
 
+describe("reading groups", () => {
+    const g1 = "{00000000-0000-4000-8000-0000000000a1}";
+    const g2 = "{00000000-0000-4000-8000-0000000000a2}";
+    const g3 = "{00000000-0000-4000-8000-0000000000a3}";
+    const groups = () => soba.run<GetGroupsResponse>(new GetGroups())!.data;
+    const members = (uuid: string) =>
+        soba.run<GetGroupMembersResponse>(new GetGroupMembers({ uuid }))!.data;
+
+    it("GetGroups lists name, type and member count, by name, nameless last by uuid", () => {
+        soba.run(new SetAttrGroup({ uuid: g1, key: "name", value: "Zeta" }));
+        soba.run(new SetAttrGroup({ uuid: g1, key: "type", value: "company" }));
+        soba.run(new AddGroupMember({ uuid: g1, address: "a@example.com" }));
+        soba.run(new AddGroupMember({ uuid: g1, address: "b@example.com" }));
+        soba.run(new SetAttrGroup({ uuid: g2, key: "name", value: "Çevre" }));
+        soba.run(new AddGroup({ uuid: g3 }));
+
+        expect(groups()).toEqual([
+            { uuid: g2, name: "Çevre", type: "", size: 0 },
+            { uuid: g1, name: "Zeta", type: "company", size: 2 },
+            { uuid: g3, name: "", type: "", size: 0 },
+        ]);
+    });
+
+    it("GetGroups with no groups is empty", () => {
+        expect(groups()).toEqual([]);
+    });
+
+    it("GetGroupMembers pairs each address with the contact holding it, case ignored", () => {
+        const ann = put({ firstName: "Ann", lastName: "Zane", emails: ["Ann@Example.com"] })!;
+        put({ firstName: "Other", emails: ["other@example.com"] });
+        soba.run(new AddGroupMember({ uuid: g1, address: "ann@example.com" }));
+        soba.run(new AddGroupMember({ uuid: g1, address: "bob@example.com" }));
+        soba.run(new AddGroupMember({ uuid: g2, address: "other@example.com" }));
+
+        const m = members(g1);
+        // ordered by what is shown: Ann's name, then bob's bare address
+        expect(m.map((x) => x.address)).toEqual(["ann@example.com", "bob@example.com"]);
+        expect(m[0].person).toEqual(
+            expect.objectContaining({ uuid: ann, firstName: "Ann", emails: ["Ann@Example.com"] }),
+        );
+        expect(m[1].person).toBeNull();
+    });
+
+    it("GetGroupMembers of an unknown group is empty", () => {
+        expect(members(g3)).toEqual([]);
+    });
+});
+
 describe("mailed objects", () => {
     const NS_BASE = "https://sobamail.com/module/base/v1";
     // the deployment's apps account, one address for every recipient whatever its domain
@@ -469,10 +588,22 @@ describe("mailed objects", () => {
         }
     });
 
-    it("a mailed PutPerson is refused", () => {
+    it("a PutPerson signed by the deployment's apps account is taken", () => {
         const put_person = { namespace, name: "PutPerson", content: { firstName: "Some" } };
-        expect(mailed_object(signed(put_person))).toBeNull();
-        for (const name of ["Group", "GroupAttr", "GroupMember", "DeletePerson"]) {
+        expect(mailed_object(signed(put_person))).toEqual(put_person);
+        expect(mailed_object(signed(put_person, "someone@api.sobamail.com"))).toBeNull();
+        expect(mailed_object(bare(put_person))).toBeNull();
+    });
+
+    it("a DeletePerson signed by the deployment's apps account is taken", () => {
+        const del = { namespace, name: "DeletePerson", content: { uuid: add_group.content.uuid } };
+        expect(mailed_object(signed(del))).toEqual(del);
+        expect(mailed_object(signed(del, "someone@api.sobamail.com"))).toBeNull();
+        expect(mailed_object(bare(del))).toBeNull();
+    });
+
+    it("person objects other than PutPerson and DeletePerson are refused", () => {
+        for (const name of ["AddPerson", "SetPersonAttr", "Group", "GroupAttr", "GroupMember"]) {
             expect(mailed_object(signed({ ...add_group, name })), name).toBeNull();
         }
         expect(mailed_object(signed({ ...add_group, namespace: NS_BASE }))).toBeNull();
@@ -590,5 +721,65 @@ describe("GetPeople", () => {
         expect(list({ filter: "match", limit: 2, offset: 0 })).toHaveLength(2);
         expect(list({ filter: "match", limit: 2, offset: 2 })).toHaveLength(1);
         expect(list({ limit: 4, offset: 4 })).toHaveLength(2);
+    });
+
+    it("keeps the people that carry every tag of tagFilter", () => {
+        put({ firstName: "Ann", tags: ["work", "golf"] });
+        put({ firstName: "Bob", tags: ["work"] });
+        put({ firstName: "Cy", tags: ["Work"] });
+        put({ firstName: "Dee", company: "work" });
+
+        const names = (tagFilter: string[]) => list({ tagFilter }).map((p) => p.firstName);
+        expect(names(["work"])).toEqual(["Ann", "Bob"]);
+        expect(names(["work", "golf"])).toEqual(["Ann"]);
+        expect(names([" golf ", "golf", ""])).toEqual(["Ann"]);
+        expect(names(["chess"])).toEqual([]);
+        expect(names([])).toEqual(["Ann", "Bob", "Cy", "Dee"]);
+    });
+
+    it("narrows a search by tagFilter and pages the result", () => {
+        for (const name of ["Delta", "Alpha", "Charlie", "Bravo"]) {
+            put({ firstName: "Match", lastName: name, tags: ["work"] });
+        }
+        put({ firstName: "Match", lastName: "Aaron" });
+        put({ firstName: "Other", lastName: "Abel", tags: ["work"] });
+
+        const last_names = (content: ConstructorParameters<typeof GetPeople>[0]) =>
+            list(content).map((p) => p.lastName);
+        expect(last_names({ filter: "match", tagFilter: ["work"] })).toEqual([
+            "Alpha",
+            "Bravo",
+            "Charlie",
+            "Delta",
+        ]);
+        expect(last_names({ tagFilter: ["work"], limit: 2, offset: 2 })).toEqual([
+            "Bravo",
+            "Charlie",
+        ]);
+    });
+
+    it("lists every tag with its number of people, by name, for GetTags", () => {
+        put({ firstName: "Ann", tags: ["work", "golf"] });
+        put({ firstName: "Bob", tags: ["work", "Çay"] });
+        put({ firstName: "Cy", tags: ["Work"], emails: ["cy@example.com"] });
+        put({ firstName: "Dee" });
+
+        const tags = () => soba.run<GetTagsResponse>(new GetTags())!.data;
+        expect(tags().map((t) => ({ ...t }))).toEqual([
+            { name: "Çay", count: 1 },
+            { name: "golf", count: 1 },
+            { name: "Work", count: 1 },
+            { name: "work", count: 2 },
+        ]);
+
+        soba.run(new DeletePerson({ uuid: list({ filter: "Bob" })[0].uuid }));
+        expect(tags().map((t) => `${t.name} ${t.count}`)).toEqual(["golf 1", "Work 1", "work 1"]);
+    });
+
+    it("drops a tag from tagFilter's result once the person loses it", () => {
+        const uuid = put({ firstName: "Ann", tags: ["work"] })!;
+        put({ uuid, firstName: "Ann", tags: [], base: { firstName: "Ann", tags: ["work"] } });
+
+        expect(list({ tagFilter: ["work"] })).toEqual([]);
     });
 });

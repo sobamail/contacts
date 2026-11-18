@@ -200,6 +200,27 @@ SELECT person,
     value
 FROM person_attr_multi_value`;
 
+// the people that carry the tag ?: (person)
+const QSTR_TAGGED_PEOPLE = `SELECT pamv.person
+FROM person_attr_multi pam
+    JOIN person_attr_multi_value pamv ON (
+        pam.person = pamv.person
+        AND pam.key = pamv.key
+    )
+WHERE pamv.key = 'tags'
+    AND pamv.value = ?`;
+
+// every tag and the number of people that carry it: (tag, count)
+const QSTR_TAGS = `SELECT pamv.value,
+    count(DISTINCT pamv.person)
+FROM person_attr_multi pam
+    JOIN person_attr_multi_value pamv ON (
+        pam.person = pamv.person
+        AND pam.key = pamv.key
+    )
+WHERE pamv.key = 'tags'
+GROUP BY pamv.value`;
+
 // every person's name: (person, firstName, lastName)
 const QSTR_PERSON_NAMES = `SELECT p.uuid,
     f.value,
@@ -324,10 +345,25 @@ export class PutPerson {
     // the stored one. With the base an edit form started from, applies only what the user
     // changed against it, so changes synced in from another replica meanwhile survive; a
     // field the user did change wins over such a change.
-    process() {
+    //
+    // `mailed` is the server's colleague card (soba-web/api, signed by apps@): it names its
+    // uuid, which is the colleague's mailbox uuid, and it answers nobody, since no task asked.
+    // One with a base edits a card (a rename, the left-the-company tag), so it is dropped
+    // when the user has deleted that card rather than bringing it back.
+    process({mailed = false} = {}) {
         const single = SINGLE_ATTRS.map((key) => [key, clean_text(this[key])]);
         const multi = MULTI_ATTRS.map((key) => [key, clean_list(this[key])]);
         const base = this.uuid ? this.base : null;
+
+        if (mailed) {
+            if (! clean_text(this.uuid)) {
+                throw new MalformedObject("Missing Person.uuid");
+            }
+            if (base && query("SELECT 1 FROM person WHERE uuid = ?", this.uuid).length === 0) {
+                soba.log.warning(`No person ${this.uuid} for a mailed edit, dropped`);
+                return;
+            }
+        }
 
         if (! this.uuid) {
             if (single.every(([, v ]) => ! v) && multi.every(([, v ]) => v.length === 0)) {
@@ -414,6 +450,10 @@ export class PutPerson {
             }
         }
 
+        if (mailed) {
+            return;
+        }
+
         // respond with the created/updated person
         soba.task.respond(new PutPersonResponse({
             uuid : this.uuid,
@@ -459,7 +499,9 @@ export class GetPeople {
     }
 
     // the uuids of the requested page, in display order. sqlite's LIKE and ORDER BY only fold
-    // ascii, so matching and sorting happen in js.
+    // ascii, so matching and sorting happen in js. a person is listed when `filter` is found
+    // in any of its values and it carries every tag of `tagFilter`, a tag compared as it is
+    // stored.
     page() {
         let matches = null;
         if (this.filter) {
@@ -472,10 +514,43 @@ export class GetPeople {
             }
         }
 
+        for (const tag of clean_list(this.tagFilter)) {
+            const tagged = new Set(query(QSTR_TAGGED_PEOPLE, tag).map(([ person ]) => person));
+            matches = matches ? new Set([...matches ].filter((u) => tagged.has(u))) : tagged;
+        }
+
         return ordered_uuids(matches).slice(this.offset, this.offset + this.limit);
     }
 
     process() { soba.task.respond(new GetPeopleResponse({data : load_people(this.page())})); }
+}
+
+// One tag as GetTags lists it: its name and the number of people that carry it
+export class TagInfo {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({name = "", count = 0} = {}) {
+        this.name = name;
+        this.count = count;
+    }
+}
+
+export class GetTagsResponse {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({data = []} = {}) { this.data = data; }
+}
+
+// Every tag any person carries, by name ignoring case and accents. tags that differ in
+// case or accents alone are tags of their own, as GetPeople's tagFilter takes them.
+export class GetTags {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor() {}
+
+    process() {
+        const data = query(QSTR_TAGS).map(
+                ([ name, count ]) => new TagInfo({name, count : Number(count)}));
+        data.sort((a, b) => compare(fold(a.name), fold(b.name)) || compare(a.name, b.name));
+        soba.task.respond(new GetTagsResponse({data}));
+    }
 }
 
 export class GetPerson {
@@ -651,10 +726,125 @@ export class DelGroupMember {
     process() { delete_if_any("group_member", {grp : this.uuid, address : this.address}); }
 }
 
+// One group as GetGroups lists it: its name and type attributes and its member count.
+export class GroupInfo {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid = "", name = "", type = "", size = 0} = {}) {
+        this.uuid = uuid;
+        this.name = name;
+        this.type = type;
+        this.size = size;
+    }
+}
+
+export class GetGroupsResponse {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({data = []} = {}) { this.data = data; }
+}
+
+// Every group, by name ignoring case and accents; groups without a name last, by uuid
+export class GetGroups {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor() {}
+
+    process() {
+        const groups = new Map();
+        for (const [uuid, key, value] of query(`SELECT g.uuid,
+    a.key,
+    a.value
+FROM grp g
+    LEFT JOIN group_attr a ON a.grp = g.uuid`)) {
+            if (! groups.has(uuid)) {
+                groups.set(uuid, new GroupInfo({uuid}));
+            }
+            if (key === "name" || key === "type") {
+                groups.get(uuid)[key] = clean_text(value);
+            }
+        }
+        for (const [uuid, size] of query("SELECT grp, count(*) FROM group_member GROUP BY grp")) {
+            if (groups.has(uuid)) {
+                groups.get(uuid).size = Number(size);
+            }
+        }
+
+        const data = Array.from(groups.values());
+        data.sort((a, b) => (! a.name - ! b.name) || compare(fold(a.name), fold(b.name))
+                        || compare(a.uuid, b.uuid));
+        soba.task.respond(new GetGroupsResponse({data}));
+    }
+}
+
+// One member of a group: its address and the contact holding that address, if any
+export class GroupMemberInfo {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({address = "", person = null} = {}) {
+        this.address = address;
+        this.person = person;
+    }
+}
+
+export class GetGroupMembersResponse {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({data = []} = {}) { this.data = data; }
+}
+
+// every stored email: (person, address)
+const QSTR_PERSON_EMAILS = `SELECT pamv.person,
+    pamv.value
+FROM person_attr_multi pam
+    JOIN person_attr_multi_value pamv ON (
+        pam.person = pamv.person
+        AND pam.key = pamv.key
+    )
+WHERE pam.key = 'emails'`;
+
+// The members of a group, each with the contact that holds its address (case ignored; the
+// first in display order when several do). Ordered by what the UI shows for a member: the
+// contact's name, else the address.
+export class GetGroupMembers {
+    static KEY = `{${namespace}}${this.name}`;
+    constructor({uuid = ""} = {}) { this.uuid = clean_text(uuid); }
+
+    process() {
+        const addresses =
+                query("SELECT address FROM group_member WHERE grp = ?", this.uuid).map((r) => r[0]);
+
+        const wanted = new Set(addresses.map((a) => a.toLowerCase()));
+        const holders = new Map(); // lowercased address -> person uuids
+        for (const [person, value] of query(QSTR_PERSON_EMAILS)) {
+            const address = clean_text(value).toLowerCase();
+            if (wanted.has(address)) {
+                if (! holders.has(address)) {
+                    holders.set(address, new Set());
+                }
+                holders.get(address).add(person);
+            }
+        }
+
+        const uuids = ordered_uuids(new Set([...holders.values() ].flatMap((s) => [...s])));
+        const people = new Map(load_people(uuids).map((p) => [p.uuid, p]));
+        const data = addresses.map((address) => {
+            const mine = holders.get(address.toLowerCase());
+            const uuid = mine ? uuids.find((u) => mine.has(u)) : undefined;
+            return new GroupMemberInfo({address, person : uuid ? people.get(uuid) : null});
+        });
+
+        const shown = (m) => {
+            const p = m.person;
+            return fold((p && `${p.firstName} ${p.lastName}`.trim()) || m.address);
+        };
+        data.sort((a, b) => compare(shown(a), shown(b)) || compare(a.address, b.address));
+        soba.task.respond(new GetGroupMembersResponse({data}));
+    }
+}
+
 const NS_BASE = "https://sobamail.com/module/base/v1";
 
-// the objects the app takes by mail
+// the objects the app takes by mail: the group requests, PutPerson for a colleague's card or a
+// merge's result, and DeletePerson for the cards a merge absorbed
 const MAILED = new Set([
+    PutPerson.KEY,
+    DeletePerson.KEY,
     AddGroup.KEY,
     DelGroup.KEY,
     SetAttrGroup.KEY,
@@ -672,7 +862,7 @@ function is_smc(v) {
 // recipient, whatever the recipient's domain.
 const ADDR_APPS = "apps@api.sobamail.com";
 
-// The object of a mailed structured message that the app takes, or null. Only the group
+// The object of a mailed structured message that the app takes, or null. Only the MAILED
 // objects are taken, and only from ADDR_APPS, in an Envelope carrying a signature: the runtime
 // rejects one that doesn't verify against From before the app runs, so a signed Envelope's
 // sender is who sent it, and an unsigned object names no sender at all.

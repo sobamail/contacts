@@ -99,3 +99,63 @@
   /* Focus */
   --focus-ring: 0 0 0 3px rgba(65,128,255,.35);
 }
+
+/* ============================================================
+   DARK THEME — only token values change. Active on
+   <html data-theme="dark">, which main.js sets while
+   prefers-color-scheme answers dark: inside Sobamail that is
+   Sobamail's own theme (the host emulates the media feature
+   for its views), elsewhere the OS's. The values are soba-chat's.
+   ============================================================ */
+[data-theme="dark"] {
+  --blue-100: #1a2740;
+  --blue-300: #33507e;
+  --blue-500: #5a92ff;
+  --blue-600: #7aacff;
+  --blue-700: #9ec1ff;
+  --blue-800: #cfe0ff;
+
+  --green-500: #2ee06a;
+  --green-600: #21c459;
+  --amber-400: #ffc94d;
+  --orange-400: #ffb454;
+  --red-300:   #ff8a72;
+  --red-400:   #ff6a4d;
+  --red-600:   #ff8a72;
+
+  --ink-100: #161b24;
+  --ink-150: #1b212b;
+  --ink-200: #232a35;
+  --ink-300: #3a4350;
+  --ink-400: #4d5663;
+
+  --color-on-primary: #0f1419;
+  --color-on-go:      #06270f;
+  --color-on-danger:  #2a0a04;
+
+  --surface-app:      #0f1419;
+  --surface-panel:    #1b212b;
+  --surface-sidebar:  #161b24;
+  --surface-paper:    #16202e;
+  --surface-raised:   #1b212b;
+  --surface-sunken:   #232a35;
+  --surface-hover:    rgba(90,146,255,.12);
+  --surface-selected: #2f63d6;
+
+  --text-primary:   #e6ebf2;
+  --text-secondary: #9aa6b5;
+  --text-muted:     #6b7686;
+  --text-on-paper:  #cfe0ff;
+  --text-on-dark:   #e6ebf2;
+  --text-link:      var(--blue-600);
+
+  --border-subtle:  #232a35;
+  --border-default: #353e4c;
+  --border-strong:  var(--blue-500);
+  --border-ink:     #000000;
+
+  --focus-ring: 0 0 0 3px rgba(90,146,255,.45);
+
+  /* the shadows' dark values are in effects.css: it loads after this
+     sheet, and its :root would win over a [data-theme] rule here */
+}

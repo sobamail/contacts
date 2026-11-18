@@ -30,6 +30,15 @@ profile's `main.db`, 2026-10-28: `CREATE TABLE "folder_attr" (... folder text, .
 and the attr and member tables need a column naming their group, which as `group` would
 be a syntax error. No name needs quoting in a reader's SQL.
 
+The UI reads groups with two requests. `GetGroups{}` answers `GetGroupsResponse{data:
+[GroupInfo{uuid, name, type, size}]}`, by name (case and accents folded), groups without
+a name last by uuid; `size` counts member rows. `GetGroupMembers{uuid}` answers
+`GetGroupMembersResponse{data: [GroupMemberInfo{address, person}]}`: every member
+address with the contact whose `emails` hold it (case-insensitive; the first in display
+order when several do), `person` null when none does, ordered by what the UI shows (the
+contact's first + last name, else the address). Pins: `contacts.test.ts`, "reading
+groups".
+
 Invariants:
 
 - Every fk is `ON DELETE CASCADE`: deleting a person removes all of its attributes,
@@ -66,7 +75,7 @@ Invariants:
 `process()` logs `JSON.stringify(metadata)` for every delivery. It dispatches
 `metadata.type` `"task"` (ui requests) and `"task-replay"` ungated, and of everything
 arriving by mail (`"message"`, limbo skipped) only what `mailed_object(message)` in
-`v1.mjs` returns: one of the six group requests, inside a `{base/v1}Envelope` with a
+`v1.mjs` returns: one of the six group requests, a `PutPerson` or a `DeletePerson`, inside a `{base/v1}Envelope` with a
 non-empty `signature` whose `sender` is `apps@api.sobamail.com` (case-insensitive) —
 the deployment's apps account, one address for every recipient whatever its domain,
 the one soba-web/api signs the group objects as (its `ADDR_APPS`; owner, 2026-10-28:
@@ -75,8 +84,28 @@ The runtime rejects a signature that doesn't
 verify against From before the app runs, so a signed Envelope's sender is who sent it;
 `Message.extractObject` drops the sender, hence the app's own unwrap (precedent:
 soba-mbmgr `user/Mutator.mjs` `process()`). Anything else by mail — a bare object, an
-unsigned one, another sender, a person object, an internal insert event — is logged and
-dropped, so nobody else can write to the address book by mail. Consequence: an
+unsigned one, another sender, a person object other than `PutPerson` and `DeletePerson`, an
+internal insert event — is logged and dropped, so nobody else can write to the address book
+by mail.
+
+A mailed `DeletePerson` is half of soba-web/api's platform-wide merge (owner, 2026-11-06;
+its `zai/contacts-merge.md`): the merged card goes out as a `PutPerson`, then each card it
+absorbed as a `DeletePerson`, the order the UI's own merge uses. Deleting a uuid the book
+doesn't hold is already a logged no-op.
+
+A mailed `PutPerson` is the server's colleague card (owner, 2026-11-06: "when a new user
+gets added to a company, everybody in the company gets him/her as a contact. the contact
+uuid is the same as the user uuid"). soba-web/api sends it to every member of a company
+when one joins, both ways; a rename sends the new name with a `base` of the old one; a
+leave or a deletion adds the tag `Former colleague` with `base: {}` and deletes nothing
+("leaves don't remove only mark as removed. the user should do the delete manually").
+`Mutator.process()` runs it as `process({mailed: true})`: the uuid is required (a
+missing one is `MalformedObject`, not a fresh person on every resend), nothing is
+answered, since no task asked, and one carrying a `base` is dropped when its person is
+gone, so a rename or a tag doesn't bring back a card the user deleted. One without a
+`base` replaces the card under its uuid, the user's own additions included (owner, same
+day: "it'd only replace on uuid collision, which is sensible"). Pins: `contacts.test.ts`
+"a mailed PutPerson", "mailed objects". Consequence: an
 instance in **shared** mode would not sync, because shared instances ship events
 between mailboxes by mail. Private-mode sync between one mailbox's replicas is
 unaffected. The gate reads no runtime state, so it runs the same whether or not the
@@ -182,8 +211,14 @@ progress bar and a Stop button, then reloads the list.
 - Search is a substring match on each value separately, case and accent insensitive
   via `fold()`: NFKD, drop U+0300 to U+036F, lowercase, `ı` to `i`. "sahin" finds
   "Şahin", "cagri" finds "Çağrı". `%` and `_` are literal.
-- `tagFilter` is ignored by the backend; the ui filters groups client-side, over the
-  loaded pages only.
+- `tagFilter` keeps the people that carry every tag in it (all, not any), on top of
+  `filter`, before the page is sliced. A tag is compared as it is stored: trimmed, but
+  case and accents count, unlike search (`contacts.test.ts`, "keeps the people that
+  carry every tag of tagFilter").
+- `GetTags{}` answers `GetTagsResponse{data: [TagInfo{name, count}]}`: every tag any
+  person carries with the number of people carrying it, by name (case and accents
+  folded). Tags that differ in case or accents alone are listed apart, as `tagFilter`
+  takes them (`contacts.test.ts`, "lists every tag with its number of people").
 - Emails are sorted case-insensitively on read (`GetPeople` and `GetPerson`).
 - Collected addresses (the client's tag `Replied`, `collected` before 2026-10-19) are
   listed with every other contact, not hidden (owner, 2026-10-13).
@@ -202,6 +237,73 @@ progress bar and a Stop button, then reloads the list.
   no email either; it still sorts into the "#" section with the other nameless people
   (owner, 2026-10-19).
 
+## Tags in the search box
+
+The search box completes tags (owner, 2026-11-17): focused, it lists the tags of every
+contact with their counts (`GetTags`, so loaded pages don't matter), narrowed as text is
+typed to those whose name holds it, folded like the search. A picked tag becomes a chip
+ahead of the text, the text that found it is cleared, and the list is re-read with the
+chips as `tagFilter` and the text as `filter`: several chips narrow further, and text
+searches within them. A picked tag is not offered again. Keys: arrows move through the
+suggestions, Enter picks the one under the keyboard and nothing when none is (the
+search runs as you type), Escape closes them, Backspace in the empty box drops the last
+chip; a chip's × drops it. Typing a tag's name without picking it still finds its people
+through `filter`, along with anyone holding the text elsewhere. Picking a group drops
+the chips, and a group's member search offers no tags: members carry none. The tags are
+re-read on every change (`refreshLive`). Pins: `App.test.ts` "tags in the search box".
+Not looked at in a running Sobamail yet (2026-11-17): the chip row and the suggestion
+panel's layout are tested in jsdom only.
+
+## Layout: lists and groups
+
+Two panes (owner, 2026-10-28): on the left, a combobox, the search box and the contact
+list under it; the detail card takes the rest. The combobox ("Contact list",
+`lib/components/ViewPicker.svelte`) is drawn by the page, not a native `<select>`: CEF
+(Sobamail 5.4.0, Chrome 117) draws a select's popup flat over the fields below it, with
+no panel or shadow, so it looks like broken layout (owner's screenshot, 2026-10-28). It
+has two sections. **Lists** holds "All contacts" alone: a tag is no list, it is picked
+in the search box (§ Tags in the search box; owner, 2026-11-17). **Groups** are the server's groups
+(`group:<uuid>`, from `GetGroups`), shown only when there is one. A group is read-only:
+its members come from `GetGroupMembers` and nothing in the UI changes them. The search
+filters them client-side (`member_matches`, folded like the backend's search). A member
+with a contact opens that contact's card, editable as anywhere else; one without opens
+a card with its address and "Add to contacts", a new contact pre-filled with it. A
+member whose online status is known gets a dot on its avatar (online, away, offline;
+the status in its tooltip), and that is all: no dot means the status is unknown, and no
+text says so (owner, 2026-10-28). The detail head names the group the member is shown
+from (`lib/groups.ts`). The group objects
+(`Group`, `GroupAttr`, `GroupMember`) are in `CHANGE_KEYS`, so a server change rereads
+the groups and the members shown; a group deleted while shown falls back to "All
+contacts". Pins: `App.test.ts` "lists and groups", `groups.test.ts`.
+
+The statuses come from the host, on the page's event stream (amp-mgui
+`doc/pub/ref/app-events.md` § Presence, 2026-11-03), because `Mutator.mjs` lists
+`{https://sobamail.com/module/base/v1}PresenceStatus` among its `objects`, by key (base
+has no class for it): the host broadcasts presence only to the apps whose `assoc` rows
+list it, which the install writes from that map, so the change reaches users with the
+next version installed. One
+`{https://sobamail.com/module/base/v1}PresenceStatus` event per colleague, its data the
+object's JSON with `content.address` and `content.state` (2 online, 1 offline, 0 the
+host no longer knows). The stream opens with every status the host knows, and each
+change follows. `watch_presence` (`lib/model.ts`) keeps its own EventSource, posts
+`{NS_CONTACTS}GetOnlineUsers` each time it opens -- the host answers 202 with no body,
+and the colleagues online arrive as events -- and hands App.svelte each status,
+address lowercased, into a `SvelteMap`; `presence_of_state` (`lib/groups.ts`) maps the
+state, unknown to no dot. The host never sends "away". Every badge carries the dot
+(owner, 2026-11-03: "dot should be shown anywhere that person's badge is shown"): the
+people list's rows, a member's row, and both detail heads. A badge stands for several
+addresses -- a contact's emails, a member's address and its contact's emails -- and
+`badge_presence` folds their dots (`address_presence`: the known status, grey for a
+group mate, none for anyone else) to the most present: green when any is online, else
+away, else red when any is offline, grey only when every dot is grey, no dot when none
+has one (owner, 2026-11-06: "green when one is green. when no greens, offline when one
+is offline. gray only when all is gray"). The contact card dots each email by its own
+status while the badge has a dot, an email with none of its own grey; a member's card
+dots its address. `StatusDot` draws both, the
+avatar's and the card's. `test/backend.ts` answers
+GetOnlineUsers as the host does. Pins: `watch.test.ts` "watch_presence", `App.test.ts`
+"dots the members whose status the host streams, and only those".
+
 ## Merging
 
 The user deduplicates the list, not the client (owner, 2026-10-19): any contact can be
@@ -217,11 +319,33 @@ stored as its `base`, then a `DeletePerson` of the other, in that order, so a fa
 in between leaves a duplicate rather than a loss. Pins: `merge.test.ts`,
 `App.test.ts` "merges a picked contact into the shown one and deletes it".
 
+## Theme
+
+Owner, 2026-11-10: the app follows Sobamail's theme. `src/lib/theme.ts`
+(`follow_color_scheme`, called from `main.ts` before mount) sets
+`data-theme="dark"` on `<html>` while `(prefers-color-scheme: dark)` matches,
+and follows its changes. Inside Sobamail the media feature answers Sobamail's
+own theme, not the OS's: amp-cef's `apply_reader_color_scheme` emulates it for
+every view (`Emulation.setEmulatedMedia`), next to Chromium's auto-darkening,
+which `<meta name="color-scheme" content="light dark">` in `index.html` keeps
+off this page. The dark values: `public/ds/tokens/colors.css` and
+`effects.css` (`[data-theme="dark"]`, soba-chat's values; the shadows sit in
+effects.css because it loads after colors.css and the two selectors weigh the
+same), and a block at the end of `src/app.css` for the colours written out
+there instead of tokens (white wells, text on filled buttons and badges), so
+the light theme stays as it was. The presence dots' colours come from
+`src/lib/presence.css`, generated by amp-mgui (its
+`resource/presence-colors.json`): never edit it here. `theme.ts` and
+`theme.test.ts` are generated the same way, from amp-mgui's
+`resource/app-theme*.ts` (soba-chat gets the same two files).
+
 ## Launch fragment
 
-The mail client launches the app with a fragment. Its "Open contact card..." uses
-`#person/show?email=<address>&name=<display name>`; the client side is in amp-mgui
-(`zai/contacts-app-facts.md`, ruling 13). Parsing is in `ui/src/lib/fragment.ts`, the
+The mail client launches the app with a fragment. Its "Open contact card..." and the
+contact button inside each address pill of the reader's header both use
+`#person/show?email=<address>&name=<display name>` (owner, 2026-11-17: the pill's button
+reuses `person/show`); the client side is in amp-mgui (`zai/contacts-app-facts.md`,
+ruling 13). Parsing is in `ui/src/lib/fragment.ts`, the
 handling in `App.svelte` `openFragment()`, on load and on `hashchange`.
 
 - `person/new` opens an empty new contact card; a query on it is ignored.
@@ -239,8 +363,14 @@ handling in `App.svelte` `openFragment()`, on load and on `hashchange`.
 - The card is looked up by exact, case-insensitive email among `GetPeople` search
   results. If several cards hold it, the one whose first + last name spells the
   display name wins, else the first. Found with the same name or no name: shown.
-  Found under another name: opened as an edit with the new name filled in, unsaved.
-  Not found: a new entry pre-filled with the email and name, unsaved.
+  Found under another name: shown, with a suggestion over the card (owner, 2026-11-17;
+  before, it opened as an unsaved edit). "Use this name" writes the rename alone, as the
+  client's collect does: a `PutPerson` with the uuid, the new name and the tags, whose
+  `base` holds the old name and tags, so nothing else changes; it is the user's edit, so
+  the Replied tag goes, as on a save from the form. Not found: the address is shown as
+  "Not in your contacts" under the name, with a suggestion whose "Add to contacts" opens
+  a new entry pre-filled with the email and name. Either suggestion goes on Dismiss, on
+  taking it, and when anything else is shown. Pins: `App.test.ts` "launch fragments".
 
 ## Tests
 
@@ -356,7 +486,9 @@ not accents.
   `PutPerson` with a known uuid and no `base` replaces the card. It happens on one
   replica too: tasks are not deduplicated (see Runtime facts). amp-mgui's ruling 9,
   which said the runtime dedupes them, is withdrawn (owner, 2026-10-13).
-- Group (tag) counts in the sidebar cover the loaded pages only.
+- List (tag) counts in the combobox cover the loaded pages only.
+- `PresenceStatus` has no class in base `Base.mjs`: the page reads the event's JSON by
+  hand (`watch_presence`).
 - The tables are an api now: amp-mgui's composer reads them directly
   (`SELECT_PEOPLE_LEGACY_SHAPE`), so a schema change breaks its autocomplete with no
   error on either side.

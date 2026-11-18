@@ -93,11 +93,33 @@ export class PutPerson implements PersonData {
     address: string;
     notes: string;
     labels: Labels;
-    process(): void;
+    // mailed: the server's colleague card (a PutPerson mailed by apps@), not a ui request
+    process(opts?: { mailed?: boolean }): void;
 }
 
 export class GetPeople {
     constructor(init?: { filter?: string; tagFilter?: string[]; limit?: number; offset?: number });
+    process(): void;
+}
+
+export interface TagInfoData {
+    name: string;
+    count: number;
+}
+
+export class TagInfo implements TagInfoData {
+    constructor(init?: Partial<TagInfoData>);
+    name: string;
+    count: number;
+}
+
+export class GetTagsResponse {
+    constructor(init?: { data?: TagInfo[] });
+    data: TagInfo[];
+}
+
+export class GetTags {
+    constructor(init?: Record<string, never>);
     process(): void;
 }
 
@@ -155,6 +177,54 @@ export class AddGroupMember {
 
 export class DelGroupMember {
     constructor(init?: { uuid?: string; address?: string });
+    process(): void;
+}
+
+// Reading the groups.
+
+export interface GroupInfoData {
+    uuid: string;
+    name: string;
+    type: string;
+    size: number;
+}
+
+export class GroupInfo implements GroupInfoData {
+    constructor(init?: Partial<GroupInfoData>);
+    uuid: string;
+    name: string;
+    type: string;
+    size: number;
+}
+
+export class GetGroupsResponse {
+    constructor(init?: { data?: GroupInfo[] });
+    data: GroupInfo[];
+}
+
+export class GetGroups {
+    constructor(init?: Record<string, never>);
+    process(): void;
+}
+
+export interface GroupMemberInfoData {
+    address: string;
+    person: PersonData | null;
+}
+
+export class GroupMemberInfo implements GroupMemberInfoData {
+    constructor(init?: Partial<GroupMemberInfoData>);
+    address: string;
+    person: PersonData | null;
+}
+
+export class GetGroupMembersResponse {
+    constructor(init?: { data?: GroupMemberInfo[] });
+    data: GroupMemberInfo[];
+}
+
+export class GetGroupMembers {
+    constructor(init?: { uuid?: string });
     process(): void;
 }
 

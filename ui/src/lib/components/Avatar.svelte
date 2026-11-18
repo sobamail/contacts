@@ -1,13 +1,8 @@
 <script>
-    // Round contact avatar — initials or image, optional status dot.
-    let { name = "", src = "", size = 36, status = "" } = $props();
+    // Round contact avatar — initials or image, optional status dot (StatusDot) on its rim.
+    import StatusDot from "./StatusDot.svelte";
 
-    /** @type {Record<string, string>} */
-    const statusColor = {
-        online: "var(--green-500)",
-        away: "var(--amber-400)",
-        offline: "var(--ink-400)",
-    };
+    let { name = "", src = "", size = 36, status = "", statusLabel = "" } = $props();
 
     const initials = $derived(
         name
@@ -29,10 +24,5 @@
     {:else}
         {initials}
     {/if}
-    {#if status}
-        <span
-            class="vm-avatar__status"
-            style="background:{statusColor[status] || 'var(--ink-400)'};"
-        ></span>
-    {/if}
+    <StatusDot class="vm-avatar__status" {status} label={statusLabel} />
 </span>

@@ -1,20 +1,45 @@
 <script lang="ts">
     import { onMount } from "svelte";
-    import { Person } from "$module/contacts/v1";
+    import { SvelteMap } from "svelte/reactivity";
+    import {
+        Person,
+        type GroupInfo,
+        type GroupMemberInfo,
+        type TagInfo,
+    } from "$module/contacts/v1";
     import {
         read_people,
         read_person,
+        read_tags,
+        read_groups,
+        read_group_members,
         put_person,
         delete_person,
         send_vcard,
         watch_people,
+        watch_presence,
         TAG_REPLIED,
     } from "$lib/model";
     import {
+        address_presence,
+        badge_presence,
+        fold,
+        member_matches,
+        member_name,
+        BADGE_PRESENCE_TEXT,
+        type BadgePresence,
+        type Presence,
+    } from "$lib/groups";
+    import {
         parse_fragment,
+        shown_panes,
+        open_full,
+        card_fragment,
+        email_fragment,
         split_name,
         same_name,
         holds_email,
+        type Pane,
     } from "$lib/fragment";
     import {
         LABEL_OPTIONS,
@@ -33,14 +58,14 @@
     import { merge_people } from "$lib/merge";
 
     import Avatar from "./lib/components/Avatar.svelte";
+    import StatusDot from "./lib/components/StatusDot.svelte";
     import Button from "./lib/components/Button.svelte";
     import IconButton from "./lib/components/IconButton.svelte";
-    import FolderItem from "./lib/components/FolderItem.svelte";
     import Tag from "./lib/components/Tag.svelte";
     import Input from "./lib/components/Input.svelte";
+    import ViewPicker from "./lib/components/ViewPicker.svelte";
 
     const icTb = (n: string) => `/ds/assets/icons/toolbar/${n}.svg`;
-    const icFd = (n: string) => `/ds/assets/icons/folders/${n}.svg`;
     const appIcon = "/ds/assets/icons/app/icon-16.svg";
 
     // ---- App state ----
@@ -49,8 +74,12 @@
     // The selected person as last fetched, for when the loaded pages don't
     // hold it (a big address book, a contact saved just now).
     let selectedCard = $state<Person | null>(null);
-    let query = $state(""); // server-side search filter
-    let group = $state("all"); // active sidebar tag (client-side filter)
+    let query = $state(""); // server-side search filter (client-side in a group)
+    // the tags picked in the search box: the list shows the contacts carrying them all
+    let tagChips = $state<string[]>([]);
+    // what the list shows, picked in the combobox: "all" or a read-only group
+    // ("group:<uuid>")
+    let view = $state("all");
     let mode = $state("view"); // "view" | "edit" | "new"
     let form: Person | null = $state(null);
     // The person as the edit form loaded it, sent along on save so that only
@@ -99,8 +128,8 @@
     );
 
     // ---- Data fetch: server search + pagination -------------------------
-    // The backend implements `filter` (search) and limit/offset; tag
-    // filtering is applied on the client below (see `filtered`).
+    // The backend implements `filter` (search), `tagFilter` (the picked tags)
+    // and limit/offset.
     // Plain variables on purpose: changing them must not re-run the effect.
     let fetchSeq = 0; // only the newest request may apply its reply
     let lastQuery = "";
@@ -108,6 +137,7 @@
     $effect(() => {
         const _r = reload;
         const q = query; // track: re-fetch when the search changes
+        const tags = [...tagChips]; // track: and when a tag is picked or dropped
         const o = offset; // track: append when scrolling
         const seq = ++fetchSeq;
         isLoading = true;
@@ -119,7 +149,7 @@
         const timer = setTimeout(
             () => {
                 const append = isAppending;
-                read_people(q, [], pageSize, o)
+                read_people(q, tags, pageSize, o)
                     .then((r) => {
                         if (seq !== fetchSeq) return;
                         lastCount = r.length;
@@ -171,10 +201,13 @@
     // shown: the loaded pages in one request, so the scroll position stays and
     // the next page follows on from them, and the selected contact.
     async function refreshLive() {
+        loadGroups();
+        loadTags();
+        if (groupUuid) loadMembers(groupUuid);
         const seq = ++fetchSeq; // drops a fetch in flight; this one covers it
         const upto = offset + pageSize;
         try {
-            const r = await read_people(query, [], upto, 0);
+            const r = await read_people(query, [...tagChips], upto, 0);
             if (seq === fetchSeq) {
                 people = r;
                 lastCount = r.length - offset;
@@ -200,6 +233,209 @@
 
     onMount(() => watch_people(refreshLive));
 
+    // ---- Tags in the search box --------------------------------------------
+    // The search box completes the tags of every contact (GetTags), loaded
+    // or not. A picked one becomes a chip ahead of the text and goes out as
+    // tagFilter; the text keeps searching within the picked tags.
+    let allTags = $state<TagInfo[]>([]);
+    let tagsSeq = 0; // only the newest request may apply its reply
+    let searchInput: HTMLInputElement | null = $state(null);
+    let suggestOpen = $state(false);
+    let suggestActive = $state(-1); // the suggestion under the keyboard, -1 for none
+    let suggestPanel: HTMLElement | null = $state(null);
+
+    async function loadTags() {
+        const seq = ++tagsSeq;
+        try {
+            const t = await read_tags();
+            if (seq === tagsSeq) allTags = t;
+        } catch (err) {
+            console.error("read_tags:", err);
+        }
+    }
+
+    $effect(() => {
+        const _r = reload;
+        loadTags();
+    });
+
+    // the tags not picked yet whose name holds the text, folded like the search
+    const suggestions = $derived.by(() => {
+        if (!suggestOpen || view !== "all") return [];
+        const needle = fold(query.trim());
+        return allTags.filter(
+            (t) => !tagChips.includes(t.name) && fold(t.name).includes(needle),
+        );
+    });
+
+    function resetPaging() {
+        offset = 0;
+        isAppending = false;
+    }
+    function pickTag(name: string) {
+        tagChips = [...tagChips, name];
+        query = ""; // the text that found the tag
+        suggestActive = -1;
+        resetPaging();
+        searchInput?.focus();
+    }
+    function dropTag(name: string) {
+        tagChips = tagChips.filter((t) => t !== name);
+        resetPaging();
+    }
+    function onSearchKeydown(e: KeyboardEvent) {
+        if (e.key === "Backspace" && !query && tagChips.length > 0 && view === "all") {
+            dropTag(tagChips[tagChips.length - 1]);
+        } else if (e.key === "Escape") {
+            suggestOpen = false;
+        } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            if (!suggestOpen) {
+                suggestOpen = true;
+                return;
+            }
+            if (suggestions.length === 0) return;
+            e.preventDefault();
+            const step = e.key === "ArrowDown" ? 1 : -1;
+            suggestActive = Math.min(
+                suggestions.length - 1,
+                Math.max(0, suggestActive + step),
+            );
+            suggestPanel
+                ?.querySelectorAll("[role=option]")
+                [suggestActive]?.scrollIntoView?.({ block: "nearest" });
+        } else if (e.key === "Enter" && suggestions[suggestActive]) {
+            e.preventDefault();
+            pickTag(suggestions[suggestActive].name);
+        }
+    }
+
+    // ---- Groups (read-only, kept by the server) ----------------------------
+    // A group lists member addresses; each comes with the contact holding it,
+    // if any. The search box filters the members here.
+    let groups = $state<GroupInfo[]>([]);
+    let members = $state<GroupMemberInfo[]>([]);
+    // the colleagues' known statuses, by lowercased address, as the host streams them
+    // (lib/model watch_presence)
+    const presence = new SvelteMap<string, Presence>();
+    onMount(() =>
+        watch_presence((address, p) => {
+            if (p) presence.set(address, p);
+            else presence.delete(address);
+        }),
+    );
+    // the member shown, by address: a member may have no contact
+    let selectedAddress = $state<string | null>(null);
+    let membersLoading = $state(false);
+    let membersSeq = 0; // only the newest request may apply its reply
+    // every group's members, lowercased: the people whose badge shows a status, unknown or not
+    let mates = $state<ReadonlySet<string>>(new Set());
+    let matesSeq = 0;
+
+    const groupUuid = $derived(
+        view.startsWith("group:") ? view.slice("group:".length) : null,
+    );
+    const activeGroup = $derived(
+        groups.find((g) => g.uuid === groupUuid) ?? null,
+    );
+
+    async function loadGroups() {
+        try {
+            groups = await read_groups();
+        } catch (err) {
+            console.error("read_groups:", err);
+            return;
+        }
+
+        // the group mates: everyone the account's groups list, the server keeping only the
+        // groups the account is in
+        const seq = ++matesSeq;
+        try {
+            const lists = await Promise.all(groups.map((g) => read_group_members(g.uuid)));
+            if (seq !== matesSeq) return;
+            mates = new Set(
+                lists.flat().map((m) => m.address.trim().toLowerCase()),
+            );
+        } catch (err) {
+            console.error("read_group_members:", err);
+        }
+    }
+
+    async function loadMembers(uuid: string) {
+        const seq = ++membersSeq;
+        membersLoading = true;
+        try {
+            const m = await read_group_members(uuid);
+            if (seq !== membersSeq) return;
+            members = m;
+        } catch (err) {
+            if (seq === membersSeq) members = [];
+            console.error("read_group_members:", err);
+        } finally {
+            if (seq === membersSeq) membersLoading = false;
+        }
+    }
+
+    $effect(() => {
+        const _r = reload;
+        loadGroups();
+    });
+
+    $effect(() => {
+        const _r = reload;
+        const g = groupUuid;
+        if (g) {
+            loadMembers(g);
+        } else {
+            ++membersSeq;
+            members = [];
+            membersLoading = false;
+        }
+    });
+
+    // a group the server deleted leaves the combobox: back to everyone
+    $effect(() => {
+        if (groupUuid && !activeGroup) {
+            view = "all";
+            selectedAddress = null;
+        }
+    });
+
+    const shownMembers = $derived(
+        members.filter((m) => member_matches(m, query)),
+    );
+    const selMember = $derived(
+        groupUuid
+            ? (members.find((m) => m.address === selectedAddress) ?? null)
+            : null,
+    );
+    // The status dot of a badge, wherever a person's badge is shown: the most present
+    // status of the addresses it stands for -- a contact's emails, a member's address --,
+    // unknown for a group mate while none is known, and none for anyone else.
+    const presenceOf = (
+        addresses: readonly (string | null | undefined)[],
+    ): BadgePresence | "" => badge_presence(presence, mates, addresses) ?? "";
+    const dotText = (p: BadgePresence | "") => (p ? BADGE_PRESENCE_TEXT[p] : "");
+    const presenceText = (addresses: readonly (string | null | undefined)[]) =>
+        dotText(presenceOf(addresses));
+    // The dot of one of the shown person's addresses in the contact card, while their badge
+    // has one: its own status, unknown for one of no known status.
+    const addressDot = (address: string): BadgePresence | "" =>
+        presenceOf(selAddresses) &&
+        (address_presence(presence, mates, address) ?? "unknown");
+    // the addresses a contact's badge stands for, and a member's
+    const personAddresses = (p: Person | null | undefined) => p?.emails ?? [];
+    const memberAddresses = (m: GroupMemberInfo) => [
+        m.address,
+        ...personAddresses(m.person),
+    ];
+    // the shown contact's: its emails, and the member's address it is shown as
+    const selAddresses = $derived.by(() => [
+        ...(selMember ? [selMember.address] : []),
+        ...personAddresses(sel),
+    ]);
+    // the detail head's line under a member's name
+    const memberLine = () => `In ${activeGroup?.name || "this group"}`;
+
     // A link that composes a message to `address`: in Sobamail the host opens
     // its own composer for an app page's mailto: links.
     const mailto = (address: string) =>
@@ -212,49 +448,30 @@
         (p.emails ?? [])[0] ||
         "(no name)";
 
-    // Sidebar groups are derived from the tags present in the loaded set.
-    const groupRows = $derived.by(() => {
-        const counts = new Map<string, number>();
-        for (const p of people) {
-            for (const t of p.tags ?? []) {
-                counts.set(t, (counts.get(t) ?? 0) + 1);
-            }
-        }
-        const tagRows = Array.from(counts.keys())
-            .sort((a, b) => a.localeCompare(b))
-            .map((t) => ({
-                key: t,
-                name: t,
-                iconSrc: icFd("folder"),
-                count: counts.get(t) ?? 0,
-                active: t === group,
-            }));
-        return [
-            {
-                key: "all",
-                name: "All contacts",
-                iconSrc: icFd("folder-user"),
-                count: people.length,
-                active: group === "all",
-            },
-            ...tagRows,
-        ];
-    });
+    // the combobox: everyone, then the server's groups
+    const pickerSections = $derived([
+        {
+            label: "Lists",
+            options: [{ key: "all", name: "All contacts", count: people.length }],
+        },
+        {
+            label: "Groups",
+            options: groups.map((g) => ({
+                key: `group:${g.uuid}`,
+                name: g.name || "(unnamed group)",
+                count: g.size,
+            })),
+        },
+    ]);
 
     // The server pages people in display order (by last name, then first
     // name, nameless last), so the loaded pages are a prefix of the full list
-    // and are kept as they come.
-    const filtered = $derived(
-        group === "all"
-            ? people
-            : people.filter((p) => (p.tags ?? []).includes(group)),
-    );
-
-    // Group the visible rows into alphabetical sections by last name.
+    // and are kept as they come, grouped into alphabetical sections by last
+    // name.
     const sections = $derived.by(() => {
         const map: Record<string, Person[]> = {};
         const order: string[] = [];
-        for (const p of filtered) {
+        for (const p of people) {
             const basis = (p.lastName || p.firstName || "#").trim();
             const k = (basis.charAt(0) || "#").toUpperCase();
             if (!map[k]) {
@@ -276,19 +493,49 @@
             (selectedCard?.uuid === selectedUuid ? selectedCard : null),
     );
 
-    const groupTitle = $derived(group === "all" ? "All contacts" : group);
     const countLabel = $derived(
-        `${filtered.length} ${filtered.length === 1 ? "contact" : "contacts"}`,
+        groupUuid
+            ? `${shownMembers.length} ${shownMembers.length === 1 ? "member" : "members"} · read-only`
+            : `${people.length} ${people.length === 1 ? "contact" : "contacts"}`,
     );
     const noSel = $derived(!sel || isForm);
 
     // ---- Actions ---------------------------------------------------------
     function select(uuid: string) {
+        // the narrow view has no card pane: the full app shows the card
+        if (!showRight) {
+            open_full(card_fragment(uuid));
+            return;
+        }
+        launchHint = null;
         selectedUuid = uuid;
+        selectedAddress = null;
         mode = "view";
     }
-    function pickGroup(key: string) {
-        group = key;
+    // a group member: its contact when it has one, else the bare address
+    function selectMember(m: GroupMemberInfo) {
+        if (!showRight) {
+            open_full(
+                m.person
+                    ? card_fragment(m.person.uuid)
+                    : email_fragment(m.address, member_name(m) === m.address ? "" : member_name(m)),
+            );
+            return;
+        }
+        launchHint = null;
+        selectedAddress = m.address;
+        selectedUuid = m.person?.uuid ?? null;
+        selectedCard = m.person ? new Person(m.person) : null;
+        mode = "view";
+    }
+    function pickView() {
+        // a group's members carry no tags
+        if (tagChips.length > 0) {
+            tagChips = [];
+            resetPaging();
+        }
+        launchHint = null;
+        selectedAddress = null;
         mode = "view";
     }
 
@@ -299,8 +546,15 @@
         form = { ...new Person(init) };
         formBase = null;
         loadFormLists(form);
+        launchHint = null;
         selectedUuid = null;
+        selectedAddress = null;
         mode = "new";
+    }
+    // a group member without a contact becomes one; it stays the member shown
+    function addMember(address: string) {
+        startNew({ emails: [address] });
+        selectedAddress = address;
     }
     async function startEdit(patch: Partial<Person> = {}) {
         if (!selectedUuid) return;
@@ -317,6 +571,7 @@
         };
         form = { ...loaded, ...patch };
         loadFormLists(form);
+        launchHint = null;
         mode = "edit";
     }
 
@@ -329,22 +584,91 @@
 
     // ---- Launch fragments (see lib/fragment) -----------------------------
     // person/new opens an empty new entry. person/show?email=…&name=… shows
-    // the card holding the email; a card under another name opens as an edit
-    // with the new name; no card opens a pre-filled new entry.
+    // the card holding the email; under another name, the card suggests the
+    // new name; with no card, the address is shown with a suggestion to add it.
     let fragmentSeq = 0; // a newer fragment wins over a lookup in flight
+
+    // What a person/show launch suggests: "rename" the card `uuid` to `name`,
+    // or "add" `email` under `name`. It goes when the user takes it, dismisses
+    // it or shows something else.
+    type LaunchHint =
+        | { kind: "rename"; uuid: string; name: string }
+        | { kind: "add"; email: string; name: string };
+    let launchHint = $state<LaunchHint | null>(null);
+
+    // The rename alone, as the client's collect writes it: the base holds the
+    // old name, so nothing else the card holds is touched. Taking it is the
+    // user's edit, so the Replied tag goes, as on a save from the form.
+    async function useLaunchName() {
+        const h = launchHint;
+        if (h?.kind !== "rename") return;
+        const [firstName, lastName] = split_name(h.name);
+        try {
+            const cur = (await read_person(h.uuid)) ?? sel;
+            if (!cur) return;
+            const tags = cur.tags ?? [];
+            await put_person(
+                new Person({
+                    uuid: h.uuid,
+                    firstName,
+                    lastName,
+                    tags: tags.filter((t) => t !== TAG_REPLIED),
+                }),
+                new Person({
+                    firstName: cur.firstName,
+                    lastName: cur.lastName,
+                    tags: [...tags],
+                }),
+            );
+            if (launchHint === h) launchHint = null;
+            offset = 0;
+            isAppending = false;
+            reload += 1; // refetch list
+            if (selectedUuid === h.uuid) selectedCard = await read_person(h.uuid);
+        } catch (err) {
+            alert(String(err));
+        }
+    }
+
+    function addLaunchAddress() {
+        const h = launchHint;
+        if (h?.kind !== "add") return;
+        const [firstName, lastName] = split_name(h.name);
+        startNew({ firstName, lastName, emails: [h.email] });
+    }
+
+    // pane/<pane>[,<pane>] shows the named panes alone; read before the first
+    // render, so the narrow view never flashes the whole app
+    let panes = $state<Pane[]>(shown_panes(location.hash));
+    const showLeft = $derived(panes.includes("left"));
+    const showRight = $derived(panes.includes("right"));
 
     async function openFragment() {
         const f = parse_fragment(location.hash);
         if (f === null) return; // the app's root
+
+        // the panes stay in the URL, so a reload keeps them
+        if (f !== "invalid" && f.action === "pane") {
+            panes = f.panes;
+            return;
+        }
 
         // Handled or invalid, the fragment goes: a reload doesn't apply it
         // again, and the same launch again changes the hash, so it is seen.
         history.replaceState(null, "", location.pathname + location.search);
         if (f === "invalid") return;
 
+        launchHint = null;
         const seq = ++fragmentSeq;
         if (f.action === "new") {
             startNew();
+            return;
+        }
+        if (f.action === "card") {
+            // not select(): a narrow view would hand it straight back out
+            selectedUuid = f.uuid;
+            selectedAddress = null;
+            mode = "view";
             return;
         }
 
@@ -360,21 +684,23 @@
         }
         if (seq !== fragmentSeq) return;
 
-        const [firstName, lastName] = split_name(f.name);
         const named = (p: Person) =>
             same_name(p.firstName ?? "", p.lastName ?? "", f.name);
         // several cards can hold one address; prefer one under this name
         const card = matches.find(named) ?? matches[0];
+        form = null;
+        mode = "view";
+        selectedAddress = null;
         if (!card) {
-            startNew({ firstName, lastName, emails: [f.email] });
+            selectedUuid = null;
+            launchHint = { kind: "add", email: f.email, name: f.name };
             return;
         }
 
         selectedUuid = card.uuid;
         selectedCard = card;
-        mode = "view";
         if (f.name && !named(card)) {
-            await startEdit({ firstName, lastName });
+            launchHint = { kind: "rename", uuid: card.uuid, name: f.name };
         }
     }
 
@@ -435,6 +761,7 @@
         try {
             await delete_person(uuid);
             selectedUuid = null;
+            selectedAddress = null;
             mode = "view";
             offset = 0;
             isAppending = false;
@@ -671,8 +998,8 @@
 </script>
 
 <div class="cx-app">
-    <!-- Toolbar -->
-    <div class="cx-toolbar">
+    <!-- Toolbar: it acts on the right pane, so it goes with it -->
+    <div class="cx-toolbar" class:cx-hidden={!showRight}>
         <IconButton
             src={icTb("add")}
             label="New contact"
@@ -735,47 +1062,29 @@
 
     <!-- Body -->
     <div class="cx-body">
-        <!-- Sidebar: groups (derived from tags) -->
-        <div class="cx-sidebar">
-            <div class="cx-account">
-                <Avatar name="Sobamail Contacts" size={34} />
-                <div style="min-width:0;">
-                    <div style="font-size:var(--text-base);">Contacts</div>
-                    <div
-                        style="font-size:var(--text-xs);color:var(--text-muted);"
-                    >
-                        sobamail.com
-                    </div>
-                </div>
-            </div>
-            <div class="cx-grouplist">
-                <div class="cx-caps">Groups</div>
-                {#each groupRows as g (g.key)}
-                    <FolderItem
-                        iconSrc={g.iconSrc}
-                        name={g.name}
-                        count={g.count}
-                        active={g.active}
-                        onclick={() => pickGroup(g.key)}
-                    />
-                {/each}
-            </div>
-            <div class="cx-status">
-                <span class="cx-dot" style="background:var(--green-500);"
-                ></span>
-                {isLoading ? "Syncing…" : `${people.length} loaded`}
-            </div>
-        </div>
-
-        <!-- Contact list -->
-        <div class="cx-listpane">
+        <!-- Contact list: the list or group picked above, the search below -->
+        <div
+            class="cx-listpane"
+            class:cx-hidden={!showLeft}
+            class:cx-listpane--alone={!showRight}
+        >
             <div class="cx-listhead">
+                <ViewPicker
+                    label="Contact list"
+                    sections={pickerSections}
+                    bind:value={view}
+                    onchange={pickView}
+                />
                 <div class="cx-listtitle">
-                    <span style="font-size:var(--text-lg);">{groupTitle}</span>
-                    <span
-                        style="font-size:var(--text-xs);color:var(--text-muted);"
-                        >{countLabel}</span
-                    >
+                    <span>{countLabel}</span>
+                    <!-- the loaded contacts say nothing about a group -->
+                    {#if groupUuid}
+                        {#if membersLoading}<span>Syncing…</span>{/if}
+                    {:else}
+                        <span
+                            >{isLoading ? "Syncing…" : `${people.length} loaded`}</span
+                        >
+                    {/if}
                 </div>
                 <div class="cx-search">
                     <img
@@ -785,18 +1094,105 @@
                         alt=""
                         style="opacity:.8;"
                     />
+                    {#if !groupUuid}
+                        {#each tagChips as t (t)}
+                            <Tag
+                                onRemove={() => dropTag(t)}
+                                removeLabel={`Remove tag ${t}`}>{t}</Tag
+                            >
+                        {/each}
+                    {/if}
                     <input
+                        bind:this={searchInput}
                         bind:value={query}
-                        placeholder="Search contacts"
+                        role="combobox"
+                        aria-label={groupUuid ? "Search members" : "Search contacts"}
+                        aria-autocomplete="list"
+                        aria-controls="cx-tag-suggestions"
+                        aria-expanded={suggestions.length > 0}
+                        autocomplete="off"
+                        placeholder={groupUuid ? "Search members" : "Search contacts"}
                         oninput={() => {
-                            offset = 0;
-                            isAppending = false;
+                            resetPaging();
+                            suggestOpen = true;
+                            suggestActive = -1;
                         }}
+                        onfocus={() => (suggestOpen = true)}
+                        onblur={() => (suggestOpen = false)}
+                        onkeydown={onSearchKeydown}
                     />
+                    {#if suggestions.length > 0}
+                        <div
+                            class="cx-picker__panel"
+                            id="cx-tag-suggestions"
+                            role="listbox"
+                            aria-label="Tags"
+                            bind:this={suggestPanel}
+                        >
+                            <div class="cx-picker__head">Tags</div>
+                            {#each suggestions as s, i (s.name)}
+                                <!-- the mousedown keeps the focus in the search box -->
+                                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                                <div
+                                    class="cx-picker__option"
+                                    class:cx-picker__option--active={i === suggestActive}
+                                    role="option"
+                                    tabindex="-1"
+                                    aria-selected={i === suggestActive}
+                                    onmousedown={(e) => e.preventDefault()}
+                                    onclick={() => pickTag(s.name)}
+                                    onmouseenter={() => (suggestActive = i)}
+                                >
+                                    <span class="cx-picker__name">{s.name}</span>
+                                    <span class="cx-picker__count">{s.count}</span>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
                 </div>
             </div>
             <div class="cx-list">
-                {#if filtered.length > 0}
+                {#if groupUuid}
+                    {#each shownMembers as m (m.address)}
+                        <button
+                            class="cx-row {m.address === selectedAddress &&
+                            !isForm
+                                ? 'cx-row--selected'
+                                : ''}"
+                            onclick={() => selectMember(m)}
+                        >
+                            <Avatar
+                                name={member_name(m)}
+                                size={40}
+                                status={presenceOf(memberAddresses(m))}
+                                statusLabel={presenceText(memberAddresses(m))}
+                            />
+                            <div style="flex:1;min-width:0;">
+                                <div class="cx-row__name">{member_name(m)}</div>
+                                <div class="cx-row__sub">
+                                    {m.person
+                                        ? member_name(m) === m.address
+                                            ? ""
+                                            : m.address
+                                        : "Not in your contacts"}
+                                </div>
+                            </div>
+                        </button>
+                    {:else}
+                        {#if !membersLoading}
+                            <div class="cx-empty">
+                                <div
+                                    style="font-size:var(--text-md);color:var(--text-secondary);"
+                                >
+                                    No members found
+                                </div>
+                            </div>
+                        {/if}
+                    {/each}
+                    {#if membersLoading}
+                        <div class="cx-loading">Loading…</div>
+                    {/if}
+                {:else if people.length > 0}
                     {#each sections as s (s.label)}
                         <div class="cx-sectionhead">{s.label}</div>
                         {#each s.rows as c (c.uuid)}
@@ -807,7 +1203,12 @@
                                     : ''}"
                                 onclick={() => select(c.uuid)}
                             >
-                                <Avatar name={fullName(c)} size={40} />
+                                <Avatar
+                                    name={fullName(c)}
+                                    size={40}
+                                    status={presenceOf(personAddresses(c))}
+                                    statusLabel={presenceText(personAddresses(c))}
+                                />
                                 <div style="flex:1;min-width:0;">
                                     <div class="cx-row__name">
                                         {fullName(c)}
@@ -829,17 +1230,17 @@
                             No contacts found
                         </div>
                         <div style="font-size:var(--text-sm);margin-top:6px;">
-                            Try a different search or group.
+                            Try a different search or tag.
                         </div>
                     </div>
                 {/if}
 
-                {#if isLoading}
+                {#if isLoading && !groupUuid}
                     <div class="cx-loading">Loading…</div>
                 {/if}
 
                 <!-- infinite-scroll sentinel -->
-                {#if lastCount >= pageSize}
+                {#if lastCount >= pageSize && !groupUuid}
                     <div
                         class="cx-sentinel"
                         bind:this={sentinel}
@@ -850,11 +1251,16 @@
         </div>
 
         <!-- Detail / form pane -->
-        <div class="cx-detail">
+        <div class="cx-detail" class:cx-hidden={!showRight}>
             {#if !isForm}
                 {#if sel}
                     <div class="cx-detailhead">
-                        <Avatar name={fullName(sel)} size={72} />
+                        <Avatar
+                            name={fullName(sel)}
+                            size={72}
+                            status={presenceOf(selAddresses)}
+                            statusLabel={presenceText(selAddresses)}
+                        />
                         <div style="flex:1;min-width:0;">
                             <div
                                 style="font-size:var(--text-2xl);line-height:1.15;"
@@ -868,6 +1274,11 @@
                                     ? `${sel.jobTitle ? " · " : ""}${sel.company}`
                                     : ""}
                             </div>
+                            {#if selMember}
+                                <div class="cx-memberof">
+                                    {memberLine()}
+                                </div>
+                            {/if}
                             {#if sel.tags?.length}
                                 <div
                                     style="display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;"
@@ -881,6 +1292,28 @@
                     </div>
 
                     <div class="cx-detailbody">
+                        {#if launchHint?.kind === "rename" && launchHint.uuid === sel.uuid}
+                            <div
+                                class="cx-suggest"
+                                role="status"
+                                aria-label="Name suggestion"
+                            >
+                                <span class="cx-suggest__text"
+                                    >The message names this contact <b
+                                        >{launchHint.name}</b
+                                    >.</span
+                                >
+                                <Button size="sm" onclick={useLaunchName}
+                                    >Use this name</Button
+                                >
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onclick={() => (launchHint = null)}
+                                    >Dismiss</Button
+                                >
+                            </div>
+                        {/if}
                         <div class="cx-infocard">
                             <div class="cx-infocard__head">Contact details</div>
                             <div class="cx-inforow">
@@ -897,7 +1330,10 @@
                                                             >{label_text(
                                                                 sel.labels.emails[e],
                                                             )}</span
-                                                        >{/if}<a
+                                                        >{/if}<StatusDot
+                                                        status={addressDot(e)}
+                                                        label={dotText(addressDot(e))}
+                                                    /><a
                                                         class="cx-maillink"
                                                         href={mailto(e)}>{e}</a
                                                     ></span
@@ -963,6 +1399,124 @@
                         <div style="flex:1;"></div>
                         <Button variant="danger" onclick={remove}>Delete</Button
                         >
+                    </div>
+                {:else if selMember}
+                    <!-- a group member no contact holds -->
+                    <div class="cx-detailhead">
+                        <Avatar
+                            name={selMember.address}
+                            size={72}
+                            status={presenceOf(memberAddresses(selMember))}
+                            statusLabel={presenceText(memberAddresses(selMember))}
+                        />
+                        <div style="flex:1;min-width:0;">
+                            <div
+                                style="font-size:var(--text-2xl);line-height:1.15;"
+                            >
+                                {selMember.address}
+                            </div>
+                            <div
+                                style="font-size:var(--text-md);color:var(--text-secondary);margin-top:3px;"
+                            >
+                                Not in your contacts
+                            </div>
+                            <div class="cx-memberof">
+                                {memberLine()}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cx-detailbody">
+                        <div class="cx-infocard">
+                            <div class="cx-infocard__head">Contact details</div>
+                            <div class="cx-inforow">
+                                <div class="cx-inforow__label">Email</div>
+                                <div
+                                    class="cx-inforow__value"
+                                    style="color:var(--text-link);font-family:var(--font-mono);"
+                                >
+                                    <StatusDot
+                                        status={presenceOf([selMember.address])}
+                                        label={presenceText([selMember.address])}
+                                    /><a
+                                        class="cx-maillink"
+                                        href={mailto(selMember.address)}
+                                        >{selMember.address}</a
+                                    >
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cx-footer">
+                        <Button
+                            variant="go"
+                            onclick={() => addMember(selMember!.address)}
+                            >Add to contacts</Button
+                        >
+                    </div>
+                {:else if launchHint?.kind === "add"}
+                    <!-- a launch's address no contact holds -->
+                    <div class="cx-detailhead">
+                        <Avatar
+                            name={launchHint.name || launchHint.email}
+                            size={72}
+                            status={presenceOf([launchHint.email])}
+                            statusLabel={presenceText([launchHint.email])}
+                        />
+                        <div style="flex:1;min-width:0;">
+                            <div
+                                style="font-size:var(--text-2xl);line-height:1.15;"
+                            >
+                                {launchHint.name || launchHint.email}
+                            </div>
+                            <div
+                                style="font-size:var(--text-md);color:var(--text-secondary);margin-top:3px;"
+                            >
+                                Not in your contacts
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cx-detailbody">
+                        <div
+                            class="cx-suggest"
+                            role="status"
+                            aria-label="Add suggestion"
+                        >
+                            <span class="cx-suggest__text"
+                                >Add {launchHint.name || launchHint.email} to your
+                                contacts?</span
+                            >
+                            <Button
+                                variant="go"
+                                size="sm"
+                                onclick={addLaunchAddress}
+                                >Add to contacts</Button
+                            >
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onclick={() => (launchHint = null)}
+                                >Dismiss</Button
+                            >
+                        </div>
+                        <div class="cx-infocard">
+                            <div class="cx-infocard__head">Contact details</div>
+                            <div class="cx-inforow">
+                                <div class="cx-inforow__label">Email</div>
+                                <div
+                                    class="cx-inforow__value"
+                                    style="color:var(--text-link);font-family:var(--font-mono);"
+                                >
+                                    <StatusDot
+                                        status={presenceOf([launchHint.email])}
+                                        label={presenceText([launchHint.email])}
+                                    /><a
+                                        class="cx-maillink"
+                                        href={mailto(launchHint.email)}
+                                        >{launchHint.email}</a
+                                    >
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 {:else}
                     <div class="cx-placeholder">
@@ -1109,7 +1663,7 @@
 
                         <Input
                             label="Tags"
-                            placeholder="comma separated (drives the Groups sidebar)"
+                            placeholder="comma separated"
                             bind:value={tagsText}
                         />
                     </div>
@@ -1129,6 +1683,8 @@
         </div>
     </div>
 </div>
+
+<div class="cx-version">v{__MUTATOR_VERSION__}</div>
 
 <svelte:window
     onhashchange={openFragment}

@@ -7,8 +7,11 @@ import { decode, encode } from "@msgpack/msgpack";
 import { vi } from "vitest";
 import {
     DeletePerson,
+    GetGroupMembers,
+    GetGroups,
     GetPeople,
     GetPerson,
+    GetTags,
     PutPerson,
     SendVCard,
     namespace,
@@ -35,8 +38,11 @@ const MAIL = { Message: FakeMessage, MessageAttachment: FakeAttachment };
 // the requests the Mutator's handlers take from the UI
 const REQUESTS: Record<string, new (content: never) => { process(mail?: unknown): void }> = {
     DeletePerson,
+    GetGroupMembers,
+    GetGroups,
     GetPeople,
     GetPerson,
+    GetTags,
     PutPerson,
     SendVCard,
 };
@@ -51,6 +57,10 @@ export async function install_backend(): Promise<Backend> {
             name: string;
             content: never;
         };
+        // the host's own object, answered before the module sees anything: the colleagues
+        // online arrive on the event stream
+        if (request.name === "GetOnlineUsers") return new Response(null, { status: 202 });
+
         const Request = REQUESTS[request.name];
         if (!Request) return new Response(null, { status: 404 });
 

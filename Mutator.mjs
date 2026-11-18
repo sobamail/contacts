@@ -20,8 +20,11 @@ import {
     DeletePerson,
     DelGroup,
     DelGroupMember,
+    GetGroupMembers,
+    GetGroups,
     GetPeople,
     GetPerson,
+    GetTags,
     Group,
     GroupAttr,
     GroupMember,
@@ -33,7 +36,7 @@ import {
     SetPersonAttr,
     SetPersonAttrLabel,
     UnsetAttrGroup,
-} from "https://sobamail.com/module/contacts/v1?sha224=H4RcRv01nNNQl6oBX24TmTu9_53payBujQcr6A";
+} from "https://sobamail.com/module/contacts/v1?sha224=nxnORq-KriZyvnBAMQMzyo6kwQ4M8a052hCpoA";
 
 // what the module's mail-sending objects need from the base module, which it can't import
 const MAIL = {
@@ -44,7 +47,7 @@ const MAIL = {
 export default class Application {
     static id = "contacts.app.sobamail.com";
     static name = "Contacts";
-    static version = "1.2.2.0";
+    static version = "1.6.1.16";
     static objects = new Map([
         [ DeleteRow.KEY, false ],
         [ AddPerson.KEY, false ],
@@ -67,7 +70,14 @@ export default class Application {
 
         [ GetPerson.KEY, false ],
         [ GetPeople.KEY, false ],
+        [ GetTags.KEY, false ],
+        [ GetGroups.KEY, false ],
+        [ GetGroupMembers.KEY, false ],
         [ SendVCard.KEY, false ],
+
+        // the host's broadcast of a colleague's online status, which reaches the event
+        // stream of the apps that list it here; base has no class for it to take the key of
+        [ "{https://sobamail.com/module/base/v1}PresenceStatus", false ],
     ]);
 
     static handlers = new Map([
@@ -91,6 +101,9 @@ export default class Application {
 
         [ GetPerson.KEY, (content) => (new GetPerson(content)).process() ],
         [ GetPeople.KEY, (content) => (new GetPeople(content)).process() ],
+        [ GetTags.KEY, (content) => (new GetTags(content)).process() ],
+        [ GetGroups.KEY, (content) => (new GetGroups(content)).process() ],
+        [ GetGroupMembers.KEY, (content) => (new GetGroupMembers(content)).process() ],
         [ SendVCard.KEY, (content) => (new SendVCard(content)).process(MAIL) ],
     ]);
 
@@ -342,7 +355,8 @@ export default class Application {
         soba.log.info(JSON.stringify(metadata));
 
         // local deliveries (ui requests, tasks and their replays) may touch the address book.
-        // by mail, only the server's group objects are taken (mailed_object() in v1.mjs).
+        // by mail, only the server's group objects and colleague cards are taken
+        // (mailed_object() in v1.mjs).
         let object = null;
         if (metadata.type === "message") {
             if (metadata.location === "limbo") {
@@ -367,7 +381,10 @@ export default class Application {
         }
 
         const key = `{${object.namespace}}${object.name}`;
-        const handler = Application.handlers.get(key);
+        // a mailed PutPerson is the server's colleague card, not a ui request (v1.mjs)
+        const handler = (metadata.type === "message" && key === PutPerson.KEY)
+                ? (content) => (new PutPerson(content)).process({mailed : true})
+                : Application.handlers.get(key);
         if (! handler) {
             soba.log.warning(`No handler found for objkey='${key}', ignored`);
             return;
